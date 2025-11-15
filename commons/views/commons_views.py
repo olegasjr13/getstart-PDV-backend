@@ -13,6 +13,7 @@ def readiness(request):
         return JsonResponse({"ok": True, "tenants_degraded": 0})
     except Exception as e:
         return JsonResponse({"ok": False, "error": str(e)}, status=503)
+        #return JsonResponse({"ok": False, status=503) em producao alterar para esta linha
 
 def time_now(request):
     now = datetime.now(timezone.utc).astimezone()

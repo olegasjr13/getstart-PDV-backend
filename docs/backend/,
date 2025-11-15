@@ -1,0 +1,48 @@
+# Scripts de Seed de Dados — GetStart PDV Backend
+
+## 1. Objetivo
+Este documento define os comandos oficiais de seed utilizados para configurar dados mínimos em ambiente de desenvolvimento.
+
+## 2. Comandos
+
+### 2.1 create_demo_tenant
+Cria um tenant de demonstração com:
+- schema_name baseado em CNPJ raiz fictício
+- domínio padrão local
+- migrações aplicadas automaticamente
+
+### 2.2 create_demo_filial_terminal
+Cria:
+- 1 filial padrão
+- 1 terminal ativo vinculado ao tenant
+
+### 2.3 create_demo_users
+Cria usuários:
+- operador
+- supervisor
+- administrador interno
+
+### 2.4 create_demo_catalogo
+Cria produtos fictícios:
+- itens de exemplo
+- preços
+- categorias
+
+## 3. Execução Recomendada
+Sequência:
+```
+python manage.py create_demo_tenant
+python manage.py create_demo_filial_terminal
+python manage.py create_demo_users
+python manage.py create_demo_catalogo
+```
+
+## 4. Considerações Multi-Tenant
+Os comandos devem usar:
+```
+with schema_context(tenant.schema_name):
+    ...
+```
+
+## 5. Próximos passos
+- Automatizar criação via Makefile.

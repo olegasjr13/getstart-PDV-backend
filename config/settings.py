@@ -54,7 +54,8 @@ TENANT_DOMAIN_MODEL = "tenants.Domain"
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
-    "django_tenants.middleware.main.TenantMainMiddleware",  # <- aqui
+    "commons.middleware.RequestLogMiddleware",
+    "django_tenants.middleware.main.TenantMainMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -198,3 +199,12 @@ LOGGING = {
         },
     },
 }
+
+#"CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "60"))
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+SECURE_HSTS_SECONDS = 63072000
+SECURE_FRAME_DENY = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_BROWSER_XSS_FILTER = True
+

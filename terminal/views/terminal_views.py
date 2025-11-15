@@ -1,37 +1,71 @@
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from django.db import transaction, connection
-from filial.models.filial_models import Filial
-from ..models.terminal_models import Terminal
-from ..serializers import ReservaNumeracaoResponse
-from django.utils import timezone
+from rest_framework.throttling import UserRateThrottle
 
-def a1_expirado(filial: Filial)->bool:
-    return (filial.a1_expires_at and filial.a1_expires_at <= timezone.now())
+from fiscal.serializers import ReservarNumeroInputSerializer
+from fiscal.services.numero_service import reservar_numero_nfce
+from ..serializers import ReservaNumeracaoResponse
+
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
+@throttle_classes([UserRateThrottle])
 def reservar_numeracao(request, id):
-    # Idempotency-Key (opcional aqui; na pré-emissão será obrigatório)
-    idem = request.headers.get("Idempotency-Key")
+    """
+    [DEPRECATED] Endpoint LEGADO de reserva de numeração de NFC-e.
 
-    try:
-        term = Terminal.objects.select_for_update().get(id=id)
-    except Terminal.DoesNotExist:
-        return Response({"code":"PDV_6006","message":"Terminal não encontrado"}, status=404)
+    🔹 Mantido apenas para compatibilidade.
+    🔹 Agora delega para o fluxo oficial:
+        - fiscal.services.numero_service.reservar_numero_nfce
+        - fiscal.views.nfce_views.reservar_numero
 
-    try:
-        filial = Filial.objects.get(id=term.filial_id)
-    except Filial.DoesNotExist:
-        return Response({"code":"PDV_6008","message":"Filial não encontrada"}, status=404)
+    ✅ Nova regra deste endpoint:
+      - Continua recebendo o terminal via URL: /terminais/<uuid:id>/reservar-numeracao
+      - Precisa receber no body:
+            {
+                "serie": <int>,
+                "request_id": "<uuid-v4>"
+            }
 
-    if a1_expirado(filial):
-        return Response({"code":"FISCAL_4005","message":"Certificado A1 expirado"}, status=403)
+      - Usa o mesmo service robusto do app fiscal:
+            - Valida vínculo usuário ↔ filial do terminal
+            - Valida certificado A1 (não expirado)
+            - Garante idempotência por request_id
+            - Garante numeração sequencial sem buracos
 
-    with transaction.atomic():
-        term = Terminal.objects.select_for_update().get(id=id)
-        term.numero_atual += 1
-        term.save(update_fields=["numero_atual"])
-        data = {"numero": term.numero_atual, "serie": term.serie}
-    return Response(ReservaNumeracaoResponse(data).data, status=200)
+    🔁 Resposta:
+      - Mantém o formato ENXUTO legado:
+            {
+                "numero": <int>,
+                "serie": <int>
+            }
+        (Ou seja, não expõe terminal_id, filial_id, request_id aqui)
+    """
+
+    # Monta o payload no formato esperado pelo fluxo oficial
+    payload = {
+        "terminal_id": id,
+        "serie": request.data.get("serie"),
+        "request_id": request.data.get("request_id"),
+    }
+
+    # Reaproveita o mesmo serializer de entrada do app fiscal
+    ser_in = ReservarNumeroInputSerializer(data=payload)
+    ser_in.is_valid(raise_exception=True)
+
+    result = reservar_numero_nfce(
+        user=request.user,
+        terminal_id=ser_in.validated_data["terminal_id"],
+        serie=ser_in.validated_data["serie"],
+        request_id=ser_in.validated_data["request_id"],
+    )
+
+    # Mantém o contrato legado: só número e série
+    legacy_payload = {
+        "numero": result.numero,
+        "serie": result.serie,
+    }
+    ser_out = ReservaNumeracaoResponse(legacy_payload)
+
+    return Response(ser_out.data, status=200)

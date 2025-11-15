@@ -1,0 +1,207 @@
+
+openapi: 3.0.3
+info:
+  title: GetStart PDV API
+  version: 1.0.0
+  description: |
+    API corporativa do GetStart PDV (NFC-e, Caixa, Sync Offline, Catálogo, Pagamentos).
+
+servers:
+  - url: https://api.getstartpdv.com/api/v1
+
+tags:
+  - name: Auth
+  - name: Tenancy
+  - name: Filial
+  - name: Terminal
+  - name: Fiscal
+  - name: Caixa
+  - name: Produtos
+  - name: Sync
+  - name: Pagamentos
+
+paths:
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Autenticação de usuário
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username: { type: string }
+                password: { type: string }
+                terminal_id: { type: string }
+              required: [username, password, terminal_id]
+      responses:
+        '200':
+          description: Login efetuado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access: { type: string }
+                  refresh: { type: string }
+                  user:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      perfil: { type: string }
+                      filial_id: { type: string }
+        '401':
+          description: Credenciais inválidas
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Atualização de token JWT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh: { type: string }
+      responses:
+        '200':
+          description: Novo access token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access: { type: string }
+
+  /fiscal/nfce/reservar-numero:
+    post:
+      tags: [Fiscal]
+      summary: Reserva sequencial de numeração NFC-e
+      parameters:
+        - name: X-Tenant-ID
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                terminal_id: { type: string }
+                serie: { type: integer }
+                request_id: { type: string }
+              required: [terminal_id, serie, request_id]
+      responses:
+        '200':
+          description: Número reservado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  numero: { type: integer }
+                  serie: { type: integer }
+                  request_id: { type: string }
+
+  /fiscal/nfce/pre-emissao:
+    post:
+      tags: [Fiscal]
+      summary: Pré-emissão NFC-e
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                request_id: { type: string }
+                payload:
+                  type: object
+      responses:
+        '200':
+          description: Pré-emissão registrada
+
+  /fiscal/nfce/emissao:
+    post:
+      tags: [Fiscal]
+      summary: Emissão NFC-e (mock)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                request_id: { type: string }
+              required: [request_id]
+      responses:
+        '200':
+          description: NFC-e emitida (mock)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  xml: { type: string }
+                  danfe_base64: { type: string }
+
+  /fiscal/nfce/cancelar:
+    post:
+      tags: [Fiscal]
+      summary: Cancelamento NFC-e
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                chave: { type: string }
+                justificativa: { type: string }
+              required: [chave, justificativa]
+      responses:
+        '200':
+          description: Cancelamento efetuado
+
+  /sync/outbox:
+    post:
+      tags: [Sync]
+      summary: Envio de eventos offline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                eventos:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      local_tx_uuid: { type: string }
+                      event_type: { type: string }
+                      payload: { type: object }
+      responses:
+        '200':
+          description: Eventos processados
+
+  /produtos/sync:
+    get:
+      tags: [Produtos]
+      summary: Sync de catálogo incremental
+      parameters:
+        - name: since_version
+          in: query
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Lista de produtos modificados
+
