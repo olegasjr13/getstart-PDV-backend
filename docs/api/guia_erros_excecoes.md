@@ -1,255 +1,299 @@
-# Guia Oficial de Erros e Exceções — GetStart PDV (Versão Enterprise)
-Versão: 1.0
-Responsável: Arquitetura Backend
+# Guia de Erros e Exceções — GetStart PDV (API Backend)
+
+## 1. Objetivo
+
+Este documento define o **padrão oficial de erros, códigos, formatos e exceções** usados no backend do GetStart PDV.
+Ele garante:
+
+- Consistência entre módulos (fiscal, vendas, auth, multi-tenant)
+- Integração perfeita com o app POS (que não usa navegador)
+- Fácil depuração e monitoramento (Sentry + logs JSON)
+- Padrão unificado para QA automatizado
+- Mapeamento SEFAZ → API (NFC-e)
+- Segurança (evitando vazar stack trace ou dados sensíveis)
 
 ---
 
-# 1. Objetivo
-Este documento define **toda a padronização oficial** de erros, exceções, códigos fiscais, mensagens e estrutura de respostas do backend GetStart PDV.
+# 2. Formato Padrão de Erros (API REST)
 
-Ele foi criado baseado diretamente no comportamento real do backend, incluindo:
-- Exceptions personalizadas do projeto
-- Tratamento de erros fiscais
-- Tratamento de erros de autenticação
-- Tratamento de erros multi-tenant
-- Estrutura de erro adotada nas views e services
-- Testes fiscais existentes no projeto
-
-O objetivo é garantir:
-- Padronização absoluta
-- Previsibilidade do comportamento da API
-- Transparência para frontend (PDV móvel)
-- Rastreabilidade para auditoria fiscal
-- Coerência para QA automatizar cenários
-
----
-
-# 2. Estrutura Padrão de Erro na API
-
-Toda resposta de erro da API deve seguir este formato:
+Todas as respostas de erro **devem retornar o seguinte formato**:
 
 ```json
 {
-  "error": {
-    "code": "FISCAL_4003",
-    "message": "Divergência de totais.",
-    "details": {... opcional ...}
-  }
+  "error": "<CODIGO_DO_ERRO>",
+  "message": "<mensagem_legivel>",
+  "details": { ... },   // opcional
+  "request_id": "<uuid>"
 }
 ```
 
-### 2.1 Campos obrigatórios
+### 2.1. Campos obrigatórios
 
-| Campo | Tipo | Obrigatório | Descrição |
-|-------|------|-------------|-----------|
-| error.code | string | ✔️ | Identificador único do erro |
-| error.message | string | ✔️ | Mensagem legível |
-| error.details | object | opcional | Campos adicionais |
+| Campo | Descrição |
+|-------|-----------|
+| `error` | Código único do erro (ver seções abaixo) |
+| `message` | Mensagem clara para o app POS |
+| `request_id` | Correlação completa com logs e auditoria |
 
-### 2.2 Regras Gerais
+### 2.2. Campos opcionais
 
-- Nunca retornar traceback para o cliente.
-- Nunca retornar exceções nativas brutas.
-- Todo erro deve ter **code + message**.
-- `code` deve ter um prefixo identificando o módulo.
-
-Ex:
-- `AUTH_1001`
-- `FISCAL_4003`
-- `TENANT_2002`
+| Campo | Uso |
+|-------|-----|
+| `details` | Dados adicionais úteis para debugging |
+| `field_errors` | Para validação de payload (HTTP 400) |
 
 ---
 
-# 3. Categorias Oficiais de Erros
+# 3. Estrutura de Códigos de Erro
 
-O projeto possui 4 categorias:
+Os códigos seguem este padrão:
 
-| Categoria | Prefixo | Uso |
-|----------|---------|-----|
-| Autenticação | AUTH | Login, token, permissões |
-| Fiscal | FISCAL | Regras NFC-e |
-| Multi-tenant | TENANT | Schema, domínio, contexto |
-| Genérico | SYS | Erros inesperados |
+```
+<MÓDULO>_<CATEGORIA><NUMERO>
+```
 
----
+### Exemplos reais:
 
-# 4. Erros de Autenticação (AUTH_1xxx)
-
-Baseados na lógica real do backend:
-
-| Código | Mensagem |
-|--------|----------|
-| AUTH_1000 | Credenciais inválidas |
-| AUTH_1001 | Usuário inativo |
-| AUTH_1002 | Tenant não autorizado |
-| AUTH_1003 | Token expirado |
-| AUTH_1004 | Refresh token inválido |
-
-Formato real:
-
-```json
-{
-  "error": {
-    "code": "AUTH_1000",
-    "message": "Credenciais inválidas."
-  }
-}
+```
+AUTH_4001      → Credenciais inválidas
+TENANT_4002    → Tenant inativo
+FISCAL_5001    → Falha de comunicação com SEFAZ
+FISCAL_4007    → Certificado A1 inválido
+VALID_4000     → Campos inválidos
 ```
 
 ---
 
-# 5. Erros Fiscais (FISCAL_4xxx)
+# 4. Categorias Oficiais
 
-Baseados diretamente nos services do módulo fiscal e nos testes do projeto.
+| Categoria | Significado |
+|----------|-------------|
+| **4000** | Erros de validação / negócio |
+| **5000** | Erros internos / externos (SEFAZ, infraestrutura) |
+| **7000** | Erros específicos do POS/coleta/terminal (opcional) |
 
-| Código | Mensagem |
-|--------|----------|
-| FISCAL_4001 | Terminal inválido |
-| FISCAL_4002 | Solicitação duplicada (request_id) |
-| FISCAL_4003 | Divergência de totais |
-| FISCAL_4004 | Item inválido |
-| FISCAL_4005 | Pagamento inválido |
-| FISCAL_4006 | Pré-emissão não encontrada |
-| FISCAL_4007 | Reserva não encontrada |
-| FISCAL_4008 | Terminal inativo |
-| FISCAL_4010 | Tentativa de emitir sem pré-emissão |
-| FISCAL_4015 | Pagamentos não correspondem ao valor total (planejado) |
-| FISCAL_4020 | Cancelamento bloqueado sem estorno (planejado) |
+---
 
-### Exemplo real:
+# 5. Códigos por Módulo
+
+A seguir os códigos oficiais por módulo.
+
+---
+
+# 5.1. AUTH (Autenticação)
+
+| Código | HTTP | Descrição |
+|--------|------|------------|
+| `AUTH_4001` | 401 | Credenciais inválidas |
+| `AUTH_4002` | 403 | Usuário sem permissão para a filial/terminal |
+| `AUTH_4003` | 403 | Tenant inativo |
+| `AUTH_4004` | 403 | Token expirado |
+| `AUTH_5001` | 500 | Erro inesperado no processo de login |
+
+---
+
+# 5.2. TENANT (Multi-tenant)
+
+| Código | HTTP | Descrição |
+|--------|------|------------|
+| `TENANT_4001` | 400 | Header `X-Tenant-ID` ausente |
+| `TENANT_4002` | 403 | Tenant inativo |
+| `TENANT_4003` | 404 | Tenant não encontrado |
+| `TENANT_5001` | 500 | Falha ao carregar o schema do tenant |
+
+---
+
+# 5.3. VALID (Validação Geral)
+
+| Código | HTTP | Descrição |
+|--------|------|------------|
+| `VALID_4000` | 400 | Validação de payload inválida |
+| `VALID_4001` | 400 | Campo obrigatório ausente |
+| `VALID_4002` | 400 | Formato inválido |
+| `VALID_4003` | 400 | Tipo incorreto |
+| `VALID_4004` | 400 | Requisição malformada |
+
+Exemplo de resposta:
 
 ```json
 {
-  "error": {
-    "code": "FISCAL_4003",
-    "message": "Divergência de totais.",
-    "details": {
-      "valor_itens": 100,
-      "valor_pagamentos": 80
-    }
-  }
+  "error": "VALID_4000",
+  "message": "Dados inválidos.",
+  "field_errors": {
+    "valor_total": ["Deve ser maior que zero."]
+  },
+  "request_id": "..."
 }
 ```
 
 ---
 
-# 6. Erros Multi-Tenant (TENANT_2xxx)
+# 5.4. FISCAL (NFC-e, SEFAZ, XML)
 
-Relativos ao schema e domínio.
+## 5.4.1. Erros de negócio (4000)
 
-| Código | Mensagem |
-|--------|----------|
-| TENANT_2001 | Tenant não encontrado |
-| TENANT_2002 | Schema inválido |
-| TENANT_2003 | Domínio não autorizado |
-| TENANT_2004 | Tenant desativado |
-
-### Exemplo:
-
-```json
-{
-  "error": {
-    "code": "TENANT_2003",
-    "message": "Domínio não autorizado."
-  }
-}
-```
+| Código | HTTP | Descrição |
+|--------|------|------------|
+| `FISCAL_4001` | 400 | Filial sem ambiente configurado |
+| `FISCAL_4002` | 400 | Certificado A1 inválido ou vencido |
+| `FISCAL_4003` | 400 | Terminal inativo |
+| `FISCAL_4004` | 400 | Número da NFC-e inválido |
+| `FISCAL_4005` | 400 | Pré-emissão não encontrada |
+| `FISCAL_4006` | 409 | Número já utilizado (idempotência) |
+| `FISCAL_4007` | 400 | Payload de venda inválido |
+| `FISCAL_4008` | 400 | Série não permitida |
+| `FISCAL_4009` | 400 | UF da filial não suportada no MVP |
 
 ---
 
-# 7. Erros Genéricos (SYS_5xxx)
+## 5.4.2. Erros de integração (5000)
 
-Sempre retornam **500**, sem expor detalhes sensíveis.
-
-| Código | Mensagem |
-|--------|----------|
-| SYS_5000 | Erro interno inesperado |
-| SYS_5001 | Falha ao processar requisição |
-| SYS_5002 | Serviço indisponível |
-
-### Exemplo:
-
-```json
-{
-  "error": {
-    "code": "SYS_5000",
-    "message": "Erro interno inesperado."
-  }
-}
-```
+| Código | HTTP | Descrição |
+|--------|------|------------|
+| `FISCAL_5001` | 502 | Falha de comunicação com SEFAZ |
+| `FISCAL_5002` | 500 | XML inválido (schema) |
+| `FISCAL_5003` | 500 | Falha na assinatura do XML |
+| `FISCAL_5004` | 500 | Retorno SEFAZ malformado |
+| `FISCAL_5005` | 500 | Timeout SEFAZ |
+| `FISCAL_5006` | 500 | Erro inesperado no client SEFAZ |
 
 ---
 
-# 8. Padronização no Código (Backend)
+## 5.4.3. Erros decorrentes da SEFAZ (rejeições)
 
-### 8.1 Estrutura recomendada de exceções
+### Sempre retornam:
 
-```python
-class FiscalException(APIException):
-    status_code = 400
-    code = "FISCAL_4000"
-    default_detail = "Erro fiscal genérico."
-```
-
-### 8.2 Lançando exceções em services
-
-```python
-raise FiscalException(
-    detail={"code": "FISCAL_4003", "message": "Divergência de totais."}
-)
-```
-
-### 8.3 Nas views
-
-Nunca tratar erro manualmente, deixar DRF converter a exceção.
-
----
-
-# 9. Padrões Específicos para Logs em Erros
-
-Todo erro deve resultar em log com:
-
-- event = `<module>_erro`
-- level = ERROR
-- code
-- tenant
-- request_id
-
-Ex:
-
-```json
-{
-  "event": "fiscal_erro",
-  "code": "FISCAL_4003",
-  "tenant": "12345678000199",
-  "request_id": "abc-123"
-}
-```
-
----
-
-# 10. Regras para QA criar testes de erro
-
-### Testes obrigatórios:
-- Credenciais inválidas
-- Terminal inválido
-- Pré-emissão inexistente
-- Totais divergentes
-- Request_id repetido
-- Token expirado
-- Tenant errado
-
-Todos os testes devem verificar **error.code**.
+- HTTP 409 (conflito)
+- `error = FISCAL_400x`
+- Mensagem contendo o código da rejeição SEFAZ
 
 Exemplo:
 
-```python
-assert resp.json()["error"]["code"] == "FISCAL_4003"
+```json
+{
+  "error": "FISCAL_4007",
+  "message": "Rejeitada pelo SEFAZ: Código 215 - Falha no schema XML.",
+  "request_id": "..."
+}
 ```
 
 ---
 
-# 11. Conclusão
+# 5.5. TERMINAL / PDV
 
-Este documento estabelece o padrão único de erros e exceções do backend GetStart PDV.
-Toda nova API deve obrigatoriamente seguir este guia, com códigos consistentes, mensagens claras e logs correlacionáveis.
+| Código | HTTP | Descrição |
+|--------|------|------------|
+| `PDV_4001` | 400 | Terminal não autorizado |
+| `PDV_4002` | 400 | Terminal não vinculado à filial |
+| `PDV_5001` | 500 | Erro inesperado do terminal |
+
+---
+
+# 5.6. INTERNAL (Erros inesperados)
+
+| Código | HTTP | Descrição |
+|--------|------|------------|
+| `INTERNAL_5000` | 500 | Erro inesperado |
+| `INTERNAL_5001` | 500 | Exceção não tratada |
+| `INTERNAL_5002` | 500 | Falha catastrófica |
+
+**Regra:**
+Nunca vazar stack trace para o PDV.
+Stack trace vai apenas para:
+
+- Logs (nível ERROR)
+- Sentry (obrigatório)
+
+---
+
+# 6. Mapeamento SEFAZ → API
+
+Exemplos:
+
+```
+[Sefaz] Autorizado uso da NF-e (100)
+→ HTTP 200 + registro normal + auditoria
+
+[Sefaz] Rejeição 215 - Falha schema XML
+→ HTTP 409 + FISCAL_4007
+
+[Sefaz] Rejeição 999 - Erro não catalogado
+→ HTTP 409 + FISCAL_4004
+
+[Sefaz] Timeout ou falha de comunicação
+→ HTTP 502 + FISCAL_5005
+```
+
+Todos carregam:
+
+```
+request_id
+tenant_id
+filial_id
+terminal_id
+```
+
+---
+
+# 7. Mapeamento de Exceções Internas → API
+
+| Exceção | Retorno API |
+|--------|--------------|
+| `DoesNotExist` | VALID_4000 / 404 |
+| `IntegrityError` | VALID_4000 / 409 |
+| `ValueError` | VALID_4000 |
+| `PermissionDenied` | AUTH_4002 |
+| `ValidationError` | VALID_4000 |
+| `TimeoutError` | FISCAL_5005 |
+| `Exception` | INTERNAL_5000 |
+
+---
+
+# 8. Exemplo Completo de Resposta
+
+```json
+{
+  "error": "FISCAL_4007",
+  "message": "Rejeitada pelo SEFAZ: Código 215 - Falha no schema.",
+  "details": {
+    "codigo_sefaz": "215",
+    "motivo": "Falha no schema XML"
+  },
+  "request_id": "0899c36c-40be-48fa-bb17-dddc7f86d2fd"
+}
+```
+
+---
+
+# 9. Log + API + Auditoria (triangulação)
+
+Para cada erro fiscal:
+
+- **API** responde erro padronizado
+- **Logs** registram evento conforme logbook
+- **Auditoria** registra quando apropriado
+
+Fluxo:
+
+```
+NfceEmissaoService
+    → client SEFAZ
+        → sucesso/rejeição/erro
+            → API retorna FISCAL_XXXX
+            → Log fiscal (nfce_emissao_*)
+            → Auditoria (conforme regra)
+```
+
+---
+
+# 10. Conclusão
+
+Este documento garante:
+
+- Qualidade dos retornos
+- Previsibilidade para o app POS
+- Padronização total entre módulos
+- Redução de bugs em QA
+- Auditoria e compliance
+
+Qualquer novo módulo deve seguir este padrão.

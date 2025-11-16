@@ -1,325 +1,397 @@
-# XML NFC-e MOCK — Guia Técnico Completo (Versão Enterprise)
-Este documento explica em profundidade como o XML MOCK de NFC-e é gerado no backend do **GetStart PDV**, baseado no código real existente (`fiscal/services/emissao_service.py`, builder interno e pré-emissão).
+# XML de NFC-e e Client MOCK — GetStart PDV
 
-Ele serve para:
-- Desenvolvedores backend
-- Desenvolvedores mobile (PDV)
-- QA
-- Auditores fiscais
-- Arquitetura
-- Equipe de implantação
+## 1. Objetivo
 
----
+Este documento define:
 
-# 1. Objetivo do XML MOCK
-O XML MOCK é uma **simulação fiel da NFC-e real**, gerado para:
-- permitir desenvolvimento fiscal sem depender da SEFAZ,
-- validar integrações internas,
-- testar DANFE,
-- simular fluxo completo: **reserva → pré → emissão**.
+- Como o backend do GetStart PDV **monta e utiliza** o XML de NFC-e.
+- Como funciona o **client MOCK de SEFAZ** para desenvolvimento/QA.
+- Qual é o **contrato** entre o `NfceEmissaoService` e os clients SEFAZ (mock e reais).
+- Como o sistema escolhe entre:
+  - Emissão via MOCK
+  - SEFAZ Homologação
+  - SEFAZ Produção
 
-Ele mantém a estrutura real da NFC-e conforme NTs oficiais.
+O foco é permitir:
 
----
+- Desenvolvimento e testes sem necessidade de certificado A1 real.
+- QA com cenários controlados (autorização, rejeição, erro).
+- Evolução simples para clients reais por UF (SP, MG, RJ, ES).
 
-# 2. Fonte de Dados do XML MOCK
-O XML é construído a partir de três entidades reais do banco:
-
-1. **NfceReserva**
-   - número
-   - série
-   - filial
-   - terminal
-   - request_id
-
-2. **NfcePreEmissao**
-   - valor total
-   - itens
-   - pagamentos
-   - CPF do consumidor
-   - timestamps
-
-3. **Dados do tenant**
-   - CNPJ
-   - Razão social
-   - Endereço
-   - Inscrição estadual
+> Este documento complementa:
+> - `regras_fiscais.md` (regras e fluxos fiscais)
+> - `sefaz_clients_arquitetura.md` (arquitetura dos clients por UF)
+> - `auditoria_nfce.md` (auditoria de emissão)
+> - `padroes_logs_backend.md` / `logbook_eventos.md` (logs fiscais)
 
 ---
 
-# 3. Estrutura Geral do XML MOCK
-Segue estrutura idêntica à NFC-e real:
+## 2. Visão Geral
 
-```
-<NFe xmlns="http://www.portalfiscal.inf.br/nfe">
-  <infNFe versao="4.00">
-    <ide>...</ide>
-    <emit>...</emit>
-    <dest>...</dest>
-    <det nItem="1">...</det>
-    <total>...</total>
-    <pag>...</pag>
-    <infAdic>...</infAdic>
-  </infNFe>
-</NFe>
-```
+### 2.1. Camadas Envolvidas
 
----
+No fluxo de emissão, temos:
 
-# 4. Geração da Chave da NFC-e
-A chave é composta por:
+1. **`NfcePreEmissao`**
+   - Contém o **payload da venda** (itens, totais, pagamentos etc.).
+   - É persistido antes da emissão.
 
-- Código da UF → 35 (padrão SP no mock)
-- Ano/Mês da emissão
-- CNPJ do emitente (tenant)
-- Modelo (65)
-- Série
-- Número da NFC-e
-- Tipo emissão
-- Código numérico gerado no backend
-- Dígito verificador
+2. **Montagem de XML** (responsabilidade da camada fiscal)
+   - Converte o payload em XML no layout exigido pela NFC-e.
 
-Exemplo:
+3. **Client SEFAZ**
+   - Implementa o contrato `SefazClientProtocol`.
+   - Pode ser:
+     - `SefazClientMock` (desenvolvimento/QA)
+     - `SefazClientSP`, `SefazClientMG`, `SefazClientRJ`, `SefazClientES` (reais, por UF).
 
-```
-35191112345678000199550010000010291000010290
-```
+4. **`NfceEmissaoService`**
+   - Orquestra a emissão:
+     - Busca a pré-emissão.
+     - Resolve filial/terminal/ambiente.
+     - Chama o client SEFAZ adequado.
+     - Trata resposta e atualiza auditoria/logs.
 
 ---
 
-# 5. Blocos do XML (com explicações)
+## 3. Contrato do Client SEFAZ (`SefazClientProtocol`)
 
-## 5.1 Bloco <ide>
-Contém a identificação da NFC-e.
+Todos os clients SEFAZ (mock e reais) devem implementar a seguinte interface:
 
-Campos principais:
+```python
+class SefazClientProtocol(Protocol):
+    def emitir_nfce(self, *, pre_emissao: NfcePreEmissao) -> dict:
+        ...
+3.1. Entrada
 
-| Campo | Origem | Observação |
-|--------|---------|-------------|
-| cUF | XML MOCK = 35 | Real = UF do tenant |
-| cNF | gerado randomicamente | código numérico |
-| natOp | "VENDA" | Futuro: CFOP por UF |
-| mod | 65 | NFC-e |
-| serie | NfceReserva | |
-| nNF | NfceReserva | número fiscal |
-| dhEmi | datetime.now | em ambiente real = servidor homologação/produção |
-| tpAmb | 2 | MOCK = homologação |
-| idDest | 1 | Operação interna |
-| finNFe | 1 | NFe normal |
-| indFinal | 1 | Consumidor final |
-| indPres | 1 | Presencial |
+pre_emissao: instância de NfcePreEmissao contendo:
 
----
+filial_id
 
-## 5.2 Bloco <emit> – Dados do Emitente
-Vêm do Tenant:
+terminal_id
 
-| Campo | Origem |
-|--------|---------|
-| CNPJ | tenant.cnpj_raiz |
-| xNome | tenant.nome |
-| xFant | tenant.nome_fantasia |
-| IE | tenant.inscricao_estadual |
-| IM | Opcional |
-| CNAE | Opcional |
-| Endereço | tenant.endereco |
+numero
 
----
+serie
 
-## 5.3 Bloco <dest> – Consumidor
-Vem da pré-emissão:
+request_id
 
-| Campo | Origem |
-|--------|---------|
-| CPF | pre_emissao.cpf | se informado |
-| xNome | não é obrigatório em NFC-e |
+payload (dados da venda, já validados).
 
-Regras reais:
-- Se CPF não enviado → omitir <dest>
+3.2. Saída (dicionário padronizado)
 
----
+O retorno deve ser um dict com, no mínimo, os campos:
 
-## 5.4 Bloco <det> — Itens da Venda
+{
+    "status": "AUTORIZADA" | "REJEITADA" | "ERRO",
+    "codigo": "<codigo_retorno_sefaz_ou_mock>",
+    "mensagem": "<mensagem_humana>",
+    "chave": "<chave_nfe_44_digitos_ou_mock>",
+    "protocolo": "<numero_protocolo_ou_mock>",
+    "xml_enviado": "<xml_assinado_em_string>",
+    "xml_resposta": "<xml_resposta_em_string_ou_vazio>",
+    "raw": { ... }  # dict com o raw original da SEFAZ/motor interno
+}
 
-Para cada item:
 
-```
-<det nItem="1">
-  <prod>
-    <cProd>001</cProd>
-    <xProd>Produto Teste</xProd>
-    <qCom>1.0000</qCom>
-    <vUnCom>10.00</vUnCom>
-    <vProd>10.00</vProd>
-    <uCom>UN</uCom>
-    <cEAN>SEM GTIN</cEAN>
-    <cEANTrib>SEM GTIN</cEANTrib>
-    <CFOP>5102</CFOP>
-  </prod>
-  <imposto>
-    <ICMS>
-      <ICMSSN102>...</ICMSSN102>
-    </ICMS>
-  </imposto>
-</det>
-```
+Regra importante:
+O NfceEmissaoService não deve precisar saber se o client é mock ou real. Ele só reage ao status/codigo/mensagem do contrato acima.
 
-Hoje o mock aplica:
-- CFOP fixo 5102
-- ICMS SN102
-- sem PIS/COFINS detalhado
+4. Client MOCK de NFC-e
+4.1. Objetivo
 
-No futuro:
-- módulo fiscal aplicará regras específicas da UF.
+O SefazClientMock é usado em:
 
----
+Ambientes de desenvolvimento (dev).
 
-## 5.5 Bloco <total>
+Ambientes de QA (testes automatizados/manual sem SEFAZ real).
 
-```
-<ICMSTot>
-  <vProd>...</vProd>
-  <vNF>...</vNF>
-</ICMSTot>
-```
+Seeds (seed_dados) e testes de ponta a ponta controlados.
 
-Valores vêm diretamente da pré-emissão.
+Ele permite:
 
----
+Emitir NFC-e sem certificado A1.
 
-## 5.6 Bloco <pag>
+Simular cenários de:
 
-Para cada método de pagamento:
+Autorização.
 
-```
-<pag>
-  <detPag>
-    <tPag>01</tPag>
-    <vPag>120.50</vPag>
-  </detPag>
-</pag>
-```
+Rejeição.
 
-Hoje:
-- mapeamento pagamentos PDV → SEFAZ mock
-Ex: dinheiro = 01, cartão = 03
+Erro técnico.
 
----
+4.2. Estratégia de Geração de XML
 
-## 5.7 Bloco <infAdic>
-Inclui Observações e referência ao pedido.
+O mock não precisa seguir 100% do layout oficial na primeira fase, mas deve:
 
----
+Gerar um XML bem formado, com:
 
-# 6. QR Code
-Hoje é gerado um QR Code simulado, com URL padrão:
+Cabeçalho básico (cUF, cNF, natOp, mod, série, número, etc.).
 
-```
-https://www.sefaz.fazenda.gov.br/QRCode/NFCE?p=<chave>
-```
+Dados do emitente (CNPJ/Filial).
 
----
+Dados do destinatário (quando existir).
 
-# 7. Estrutura Real versus MOCK
+Itens da venda (produtos, CFOP, NCM, valores).
 
-| Campo | MOCK | REAL |
-|-------|------|------|
-| Assinatura XML | ❌ Não tem | ✔️ Obrigatória |
-| CSC | ❌ Não tem | ✔️ Obrigatória |
-| Webservice | ❌ Não usa | ✔️ Autorizador |
-| Retorno protocolo | Simulado | Real SEFAZ |
+Totais (ICMS, ICMS-ST, PIS/COFINS, etc. — mesmo que simplificados).
 
----
+Dados de pagamento (cartão, dinheiro, etc.).
 
-# 8. Mapeamento: Pré-Emissão → XML
+O objetivo é:
 
-| Campo Pré | Campo XML |
-|-----------|-----------|
-| numero | ide.nNF |
-| serie | ide.serie |
-| CNPJ tenant | emit.CNPJ |
-| CPF | dest.CPF |
-| itens[] | det[] |
-| pagamentos[] | pag[] |
-| valor_total | total.vNF |
+Permitir testes de montagem/parse do XML dentro do backend.
 
----
+Permitir evolução suave para uso do mesmo “builder” de XML em clients reais.
 
-# 9. Exemplo Completo de XML MOCK (realista)
+4.3. Geração de CHAVE e PROTOCOLO (mock)
 
-```xml
-<NFe xmlns="http://www.portalfiscal.inf.br/nfe">
-  <infNFe versao="4.00">
-    <ide>
-      <cUF>35</cUF>
-      <cNF>12345678</cNF>
-      <natOp>VENDA</natOp>
-      <mod>65</mod>
-      <serie>1</serie>
-      <nNF>1029</nNF>
-      <dhEmi>2025-01-10T14:00:00-03:00</dhEmi>
-      <tpNF>1</tpNF>
-      <idDest>1</idDest>
-      <tpAmb>2</tpAmb>
-      <finNFe>1</finNFe>
-      <indFinal>1</indFinal>
-      <indPres>1</indPres>
-    </ide>
-    <emit>
-      <CNPJ>12345678000199</CNPJ>
-      <xNome>Empresa Teste LTDA</xNome>
-      <IE>1234567890</IE>
-    </emit>
-    <dest>
-      <CPF>00000000000</CPF>
-    </dest>
-    <det nItem="1">
-      <prod>
-        <cProd>001</cProd>
-        <xProd>Produto Teste</xProd>
-        <qCom>1.0000</qCom>
-        <vUnCom>120.50</vUnCom>
-        <vProd>120.50</vProd>
-        <CFOP>5102</CFOP>
-      </prod>
-    </det>
-    <total>
-      <ICMSTot>
-        <vProd>120.50</vProd>
-        <vNF>120.50</vNF>
-      </ICMSTot>
-    </total>
-    <pag>
-      <detPag>
-        <tPag>03</tPag>
-        <vPag>120.50</vPag>
-      </detPag>
-    </pag>
-  </infNFe>
-</NFe>
-```
+Para o mock, a chave de acesso (chave) e protocolo podem ser gerados internamente:
 
----
+chave:
 
-# 10. Evolução Futura para Modo Real SEFAZ
+String com 44 dígitos, montagem “fake” porém coerente:
 
-Checklist:
+UF (cUF)
 
-1. Adicionar assinatura XML (A1)
-2. Implementar CSC (Configuração por UF)
-3. Implementar:
-   - envio lote
-   - retorno lote
-   - consulta processamento
-   - consulta protocolo
-4. Cancelamento
-5. Carta de correção
-6. Contingência offline
+Ano/mês
 
-Backend já está pronto para receber isso através do modelo atual.
+CNPJ
 
----
+Modelo
 
-# 11. Conclusão
+Série
 
-O módulo MOCK simula 100% do fluxo de emissão NFC-e de forma compatível com o padrão nacional. Este documento serve como base para desenvolvimento, auditoria e evolução para emissão SEFAZ real.
+Número
+
+Tipo de emissão
+
+Código numérico
+
+DV
+
+Não precisa ter validação oficial em ambientes dev/qa.
+
+protocolo:
+
+String numérica simulando o formato da SEFAZ.
+
+5. Cenários de Mock
+
+O SefazClientMock.emitir_nfce deve permitir simular diferentes cenários com base em:
+
+Flags no payload.
+
+Valores específicos (ex.: total da venda).
+
+Dados artificiais (ex.: cliente com CPF “forçado” para rejeição).
+
+5.1. Emissão bem-sucedida (AUTORIZADA)
+
+Regra sugerida:
+
+Cenário padrão → se não houver nenhuma “flag de erro” no payload, o mock retorna:
+
+{
+    "status": "AUTORIZADA",
+    "codigo": "100",
+    "mensagem": "Autorizado o uso da NF-e (MOCK)",
+    "chave": "<chave_mock>",
+    "protocolo": "<protocolo_mock>",
+    "xml_enviado": "<xml_assinado_mock>",
+    "xml_resposta": "<xml_resposta_mock>",
+    "raw": { "mock": True, "cenario": "AUTORIZADA" }
+}
+
+
+Logs obrigatórios: nfce_emissao_mock_sucesso
+Auditoria: recomendada em QA, opcional em dev.
+
+5.2. Rejeição (REJEITADA)
+
+O mock deve permitir simular rejeições comuns, por exemplo:
+
+CFOP inválido para operação.
+
+NCM inexistente.
+
+Total da NF e soma dos itens divergente.
+
+Uso de campo customizado no payload ("mock_rejeicao": "XXX").
+
+Exemplo de regra simples:
+
+Se o payload contiver:
+
+"mock_rejeicao": {
+    "codigo": "999",
+    "mensagem": "Rejeição mock configurada"
+}
+
+
+então o client retorna:
+
+{
+    "status": "REJEITADA",
+    "codigo": "999",
+    "mensagem": "Rejeição mock configurada",
+    "chave": None,
+    "protocolo": None,
+    "xml_enviado": "<xml_assinado_mock>",
+    "xml_resposta": "<xml_resposta_mock_rejeicao>",
+    "raw": { "mock": True, "cenario": "REJEITADA" }
+}
+
+
+Logs obrigatórios: nfce_emissao_mock_erro
+Auditoria: opcional (em QA, pode ser usado para trilha completa de rejeições).
+
+5.3. Erro técnico (ERRO)
+
+Também é útil simular erros técnicos:
+
+Timeout.
+
+Falha de comunicação.
+
+Exceção interna.
+
+Pode ser feito com uma flag no payload, ex.:
+
+"mock_erro": {
+    "tipo": "TIMEOUT",
+    "mensagem": "Timeout simulado na comunicação com SEFAZ (mock)"
+}
+
+
+O client pode:
+
+Lançar uma exceção específica (capturada pelo NfceEmissaoService), ou
+
+Retornar status="ERRO" com detalhamento em codigo/mensagem.
+
+Exemplo de resposta:
+
+{
+    "status": "ERRO",
+    "codigo": "MOCK_TIMEOUT",
+    "mensagem": "Timeout simulado na comunicação com SEFAZ (mock)",
+    "chave": None,
+    "protocolo": None,
+    "xml_enviado": "<xml_assinado_mock>",
+    "xml_resposta": "",
+    "raw": { "mock": True, "cenario": "ERRO", "tipo": "TIMEOUT" }
+}
+
+
+Logs obrigatórios: nfce_emissao_mock_erro
+Sentry: pode ser usado quando for interessante ver stack trace mesmo em ambiente de QA.
+
+6. Seleção entre MOCK, Homologação e Produção
+
+A escolha de qual client usar não deve ficar no código do PDV/app, e sim na configuração de backend (multi-tenant + filial).
+
+6.1. Estratégia recomendada
+
+Campos na Filial (exemplo):
+
+uf — UF da filial (SP, MG, RJ, ES).
+
+nfce_ambiente — "mock" | "homolog" | "producao".
+
+6.2. Factory de clients
+
+Função (descrita em detalhes em sefaz_clients_arquitetura.md):
+
+def get_sefaz_client(*, uf: str, ambiente: str, filial: Filial) -> SefazClientProtocol:
+    if ambiente == "mock":
+        return SefazClientMock()
+    if uf == "SP":
+        return SefazClientSP(...)
+    if uf == "MG":
+        return SefazClientMG(...)
+    ...
+
+6.3. Uso no NfceEmissaoService
+
+O service faz:
+
+Busca NfcePreEmissao por request_id.
+
+Busca Filial e valida nfce_ambiente.
+
+Chama get_sefaz_client(uf=filial.uf, ambiente=filial.nfce_ambiente, filial=filial).
+
+Chama client.emitir_nfce(pre_emissao=pre_emissao).
+
+Dessa forma:
+
+Em dev/qa → nfce_ambiente = "mock" → usa SefazClientMock.
+
+Em homologação → nfce_ambiente = "homolog" → usa client real apontando para SEFAZ homolog.
+
+Em produção → nfce_ambiente = "producao" → usa client real apontando para SEFAZ produção.
+
+7. Logs e Auditoria ligados ao MOCK
+
+Mesmo com mock, algumas coisas devem ser seguidas:
+
+Eventos de log:
+
+nfce_emissao_mock_sucesso
+
+nfce_emissao_mock_erro
+
+Campos de contexto obrigatórios:
+
+tenant_id, filial_id, terminal_id, user_id, request_id, numero, serie.
+
+Auditoria:
+
+Dev: opcional.
+
+QA: recomendado (NfceAuditoria marcando ambiente="mock").
+
+A ideia é que a infra/observabilidade consiga ver claramente:
+
+Quando a emissão é mock.
+
+Qual cenário de mock foi disparado (autorizado, rejeitado, erro).
+
+8. Considerações de Segurança e Compliance
+
+Mesmo no mock:
+
+Não logar dados sensíveis (cartão, senhas, etc.).
+
+Não expor chaves reais ou certificados em logs.
+
+O mock não deve ser utilizado em ambiente de produção.
+
+Em produção:
+
+O uso de client mock deve estar bloqueado por configuração.
+
+Toda emissão deve passar por:
+
+Certificado A1 válido.
+
+Client real por UF.
+
+Auditoria em banco.
+
+9. Evolução
+
+Conforme o projeto avançar:
+
+O mock poderá:
+
+Validar schemas XML contra XSD local.
+
+Simular perfis mais complexos de rejeição.
+
+Ser usado em testes automatizados de integração.
+
+Clients reais por UF (SP, MG, RJ, ES) serão implementados usando a mesma estrutura de montagem de XML.
+
+Sempre que o contrato do SefazClientProtocol for alterado, este documento deve ser atualizado.
