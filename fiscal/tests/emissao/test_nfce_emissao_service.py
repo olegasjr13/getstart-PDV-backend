@@ -14,9 +14,14 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from filial.models.filial_models import Filial
 from terminal.models.terminal_models import Terminal
-from fiscal.models import NfceNumeroReserva, NfceDocumento, NfceAuditoria, NfcePreEmissao
+from fiscal.models import (
+    NfceNumeroReserva,
+    NfceDocumento,
+    NfceAuditoria,
+    NfcePreEmissao,
+)
 from fiscal.services.emissao_service import emitir_nfce, EmitirNfceResult
-
+from fiscal.sefaz_clients import MockSefazClient
 
 TENANT_SCHEMA = "12345678000199"
 TENANT_HOST = "cliente-demo.localhost"
@@ -25,6 +30,7 @@ TENANT_HOST = "cliente-demo.localhost"
 # ---------------------------------------------------------------------------
 # Helpers de tenant / auth (mesmo padrão dos outros testes fiscais)
 # ---------------------------------------------------------------------------
+
 
 def _bootstrap_public_tenant_and_domain():
     Tenant = get_tenant_model()
@@ -108,31 +114,48 @@ def _post_pre_emissao(client: APIClient, request_id, payload: dict):
 # Fake SEFAZ client (implementa o contrato esperado pela service)
 # ---------------------------------------------------------------------------
 
-class FakeSefazClient:
+
+class FakeSefazClient(MockSefazClient):
     """
-    Implementa o método emitir_nfce(pre_emissao=...) conforme o protocolo
-    SefazClientProtocol definido em fiscal.services.emissao_service.
+    Client SEFAZ fake para testes de emissão.
+
+    Herda de MockSefazClient (fiscal.sefaz_clients) para manter o mesmo
+    comportamento de ambiente/UF, mas expõe o método emitir_nfce(pre_emissao=...)
+    que é o contrato atual usado pela service emitir_nfce.
     """
 
     def emitir_nfce(self, *, pre_emissao):
-        # pre_emissao é uma instância de NfcePreEmissao
-        # Simulamos um retorno de autorização bem-sucedida.
+        """
+        Adapta a chamada do MockSefazClient.autorizar_nfce para o formato
+        de dicionário que a service emitir_nfce espera hoje.
+        """
+        # Carrega a filial pela FK, pois NfcePreEmissao tem apenas filial_id
+        filial = Filial.objects.get(id=pre_emissao.filial_id)
+
+        # Emissão "real" mockada via MockSefazClient
+        resp = self.autorizar_nfce(
+            filial=filial,
+            pre_emissao=pre_emissao,
+            numero=pre_emissao.numero,
+            serie=pre_emissao.serie,
+        )
+
+        status = "autorizada" if resp.codigo == 100 else "rejeitada"
+
         return {
-            "chave_acesso": "NFe35181111111111111111550010000000011000000010",
-            "protocolo": "135180000000001",
-            "status": "autorizada",
-            "xml_autorizado": "<xml>autorizado</xml>",
-            "mensagem": "Autorizado o uso da NF-e",
-            "raw": {
-                "codigo": "100",
-                "descricao": "Autorizado o uso da NF-e",
-            },
+            "chave_acesso": resp.chave_acesso,
+            "protocolo": resp.protocolo,
+            "status": status,
+            "xml_autorizado": resp.xml_autorizado,
+            "mensagem": resp.mensagem,
+            "raw": resp.raw,
         }
 
 
 # ---------------------------------------------------------------------------
 # Teste principal: fluxo feliz de emissão
 # ---------------------------------------------------------------------------
+
 
 @override_settings(
     ROOT_URLCONF="config.urls",
@@ -224,14 +247,16 @@ def test_emitir_nfce_happy_path():
     assert result.filial_id == str(filial.id)
     assert result.request_id == str(req_id)
 
-    # campos da SEFAZ simulada
-    assert result.chave_acesso == "NFe35181111111111111111550010000000011000000010"
-    assert result.protocolo == "135180000000001"
+    # campos da SEFAZ simulada (MockSefazClient)
+    assert result.chave_acesso.startswith("NFe")
+    assert len(result.chave_acesso) <= 44
+    assert result.protocolo  # não vazio
     assert result.status == "autorizada"
-    assert result.xml_autorizado == "<xml>autorizado</xml>"
-    assert result.mensagem == "Autorizado o uso da NF-e"
+    assert result.xml_autorizado is not None
+    assert "Autorizado" in (result.mensagem or "")
     assert isinstance(result.raw_sefaz, dict)
-    assert result.raw_sefaz.get("codigo") == "100"
+    assert str(result.raw_sefaz.get("codigo")) == "100"
+
 
 @override_settings(
     ROOT_URLCONF="config.urls",
@@ -352,6 +377,7 @@ class FakeSefazClientCounting(FakeSefazClient):
     """
 
     def __init__(self):
+        super().__init__()
         self.call_count = 0
 
     def emitir_nfce(self, *, pre_emissao):
@@ -455,13 +481,14 @@ def test_emitir_nfce_idempotencia_reusa_documento_sem_chamar_sefaz_duas_vezes():
     assert result1.protocolo == result2.protocolo
     assert result1.status == result2.status
 
+
 class FakeSefazClientRejected(FakeSefazClient):
     """
     Variante do FakeSefazClient que simula uma rejeição da SEFAZ.
     """
 
     def emitir_nfce(self, *, pre_emissao):
-        # Simula uma resposta de rejeição, seguindo o padrão usado no FakeSefazClient
+        # Simula uma resposta de rejeição, seguindo o padrão usado anteriormente
         return {
             "status": "rejeitada",
             "chave_acesso": "NFe35181111111111111111550010000000011000000010",

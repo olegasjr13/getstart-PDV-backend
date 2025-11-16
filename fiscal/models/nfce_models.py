@@ -81,6 +81,17 @@ class NfceDocumento(models.Model):
     ambiente = models.CharField(max_length=20, default="homolog")
     uf = models.CharField(max_length=2, blank=True, null=True)
 
+    # =============================
+    # CAMPOS DE CONTINGÊNCIA NFC-e
+    # =============================
+    em_contingencia = models.BooleanField(default=False)
+
+    contingencia_ativada_em = models.DateTimeField(null=True, blank=True)
+
+    contingencia_motivo = models.CharField(max_length=255, null=True, blank=True)
+
+    contingencia_regularizada_em = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 

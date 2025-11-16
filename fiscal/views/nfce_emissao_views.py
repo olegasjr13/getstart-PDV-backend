@@ -3,7 +3,7 @@
 import logging
 from dataclasses import asdict
 
-from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.exceptions import ValidationError as DjangoValidationError, ObjectDoesNotExist
 
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -16,22 +16,60 @@ from rest_framework.exceptions import (
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from filial.models.filial_models import Filial
 from fiscal.serializers_emissao import (
     EmitirNfceInputSerializer,
     EmitirNfceOutputSerializer,
 )
 from fiscal.services.emissao_service import emitir_nfce
+from fiscal.models import NfcePreEmissao
+from fiscal.sefaz_factory import get_sefaz_client_for_filial
 
 logger = logging.getLogger("pdv.fiscal")
 root_logger = logging.getLogger()
 
 
+class SefazEmitirAdapter:
+    """
+    Adaptador que expõe o método emitir_nfce(pre_emissao=...)
+    a partir de um client baseado em SefazClientProtocol (MockSefazClient, etc).
+
+    A service emitir_nfce continua falando com um client que tem emitir_nfce,
+    mas por baixo usamos autorizar_nfce(filial, pre_emissao, numero, serie)
+    da implementação real (MockSefazClient ou futura implementação por UF).
+    """
+
+    def __init__(self, inner_client, filial: Filial):
+        self.inner_client = inner_client
+        self.filial = filial
+
+    def emitir_nfce(self, *, pre_emissao):
+        """
+        Adapta a chamada do client SEFAZ real (autorizar_nfce) para o formato
+        de dicionário que a service emitir_nfce espera hoje.
+        """
+        resp = self.inner_client.autorizar_nfce(
+            filial=self.filial,
+            pre_emissao=pre_emissao,
+            numero=pre_emissao.numero,
+            serie=pre_emissao.serie,
+        )
+
+        status = "autorizada" if resp.codigo == 100 else "rejeitada"
+
+        return {
+            "chave_acesso": resp.chave_acesso,
+            "protocolo": resp.protocolo,
+            "status": status,
+            "xml_autorizado": resp.xml_autorizado,
+            "mensagem": resp.mensagem,
+            "raw": resp.raw,
+        }
+
+
 def _tenant_id_from_request(request):
     """
     Extrai o identificador do tenant do request.
-
-    Segue o mesmo padrão utilizado nas demais views fiscais
-    (via request.tenant.schema_name quando presente).
     """
     return getattr(getattr(request, "tenant", None), "schema_name", None)
 
@@ -49,11 +87,12 @@ def emitir_nfce_view(request):
     Fluxo:
 
     1. Valida o payload com EmitirNfceInputSerializer (request_id).
-    2. Chama o serviço fiscal.services.emissao_service.emitir_nfce.
-    3. Serializa o resultado com EmitirNfceOutputSerializer.
-    4. Registra logs estruturados de sucesso/erro conforme padrões
-       definidos em docs/observabilidade/padroes_logs_backend.md
-       e docs/observabilidade/logbook_eventos.md.
+    2. Localiza a NfcePreEmissao e a filial correspondente.
+    3. Usa a factory get_sefaz_client_for_filial para obter o client SEFAZ.
+    4. Adapta o client para o contrato da service (emitir_nfce).
+    5. Chama o serviço fiscal.services.emissao_service.emitir_nfce.
+    6. Serializa o resultado com EmitirNfceOutputSerializer.
+    7. Registra logs estruturados de sucesso/erro.
     """
 
     tenant_id = _tenant_id_from_request(request)
@@ -69,31 +108,33 @@ def emitir_nfce_view(request):
         request_id = ser_in.validated_data["request_id"]
 
         # ------------------------------------------------------------------
-        # 2) Chamada à service de emissão
-        #    - A service já aplica:
-        #      * validação de vínculo user↔filial
-        #      * validação de NfcePreEmissao existente
-        #      * integração com NfceDocumento + NfceAuditoria
+        # 2) Localiza pré-emissão e filial
         # ------------------------------------------------------------------
-        # Importante: o client SEFAZ concreto será injetado na Sprint 3
-        # via fábrica adequada. Por enquanto assumimos que o service
-        # será chamado com o client correto em outro ponto.
-        #
-        # Aqui usamos None para sefaz_client, pois você já injeta o client
-        # em outros pontos ou via composição externa conforme evolução.
-        #
-        # Se preferir, este ponto pode ser trocado por uma factory:
-        #   sefaz_client = get_sefaz_client_for_request(user, request)
-        #   result = emitir_nfce(user=user, request_id=request_id, sefaz_client=sefaz_client)
-        #
-        # No momento, mantemos explícito o parâmetro para não acoplar
-        # a view a um mock fixo.
-        from fiscal.tests.emissao.test_nfce_emissao_service import (  # type: ignore
-            FakeSefazClient,
-        )
+        try:
+            pre = NfcePreEmissao.objects.get(request_id=request_id)
+        except ObjectDoesNotExist:
+            raise NotFound(
+                detail="Pré-emissão NFC-e não encontrada para o request_id informado."
+            )
 
-        sefaz_client = FakeSefazClient()
+        try:
+            filial = Filial.objects.get(id=pre.filial_id)
+        except Filial.DoesNotExist:
+            raise NotFound(detail="Filial associada à pré-emissão não encontrada.")
 
+        # ------------------------------------------------------------------
+        # 3) Obtém client SEFAZ via factory (SP/MG/RJ/ES, homolog/produção)
+        # ------------------------------------------------------------------
+        inner_client = get_sefaz_client_for_filial(filial)
+
+        # ------------------------------------------------------------------
+        # 4) Adaptador que expõe emitir_nfce(pre_emissao=...)
+        # ------------------------------------------------------------------
+        sefaz_client = SefazEmitirAdapter(inner_client, filial)
+
+        # ------------------------------------------------------------------
+        # 5) Chamada à service de emissão
+        # ------------------------------------------------------------------
         result = emitir_nfce(
             user=user,
             request_id=request_id,
@@ -101,7 +142,7 @@ def emitir_nfce_view(request):
         )
 
         # ------------------------------------------------------------------
-        # 3) Serialização de saída (DTO → serializer)
+        # 6) Serialização de saída
         # ------------------------------------------------------------------
         payload = getattr(result, "__dict__", None) or asdict(result)
         ser_out = EmitirNfceOutputSerializer(payload)
@@ -125,9 +166,6 @@ def emitir_nfce_view(request):
         return Response(ser_out.data, status=status.HTTP_200_OK)
 
     except DRFValidationError as exc:
-        # Erros de validação de payload (400)
-        # Podem ser mapeados para códigos fiscais específicos no futuro,
-        # conforme docs/api/guia_erros_excecoes.md
         logger.warning(
             "nfce_emitir_validacao",
             extra={
@@ -141,7 +179,6 @@ def emitir_nfce_view(request):
         raise
 
     except DjangoValidationError as exc:
-        # Converte validações do Django em DRFValidationError
         logger.warning(
             "nfce_emitir_validacao_django",
             extra={
@@ -155,7 +192,6 @@ def emitir_nfce_view(request):
         raise DRFValidationError(detail=exc.message_dict)
 
     except NotFound as exc:
-        # NfcePreEmissao inexistente, filial/terminal não encontrados etc.
         logger.warning(
             "nfce_emitir_not_found",
             extra={
@@ -169,7 +205,6 @@ def emitir_nfce_view(request):
         raise
 
     except PermissionDenied as exc:
-        # Usuário sem permissão na filial/terminal
         logger.warning(
             "nfce_emitir_permission_denied",
             extra={
@@ -183,7 +218,6 @@ def emitir_nfce_view(request):
         raise
 
     except APIException as exc:
-        # Exceções já mapeadas como APIException (por ex. códigos fiscais específicos)
         logger.error(
             "nfce_emitir_api_exception",
             extra={
@@ -197,7 +231,6 @@ def emitir_nfce_view(request):
         raise
 
     except Exception as exc:
-        # Erro inesperado → logar como erro interno, retornando FISCAL_5999
         logger.exception(
             "nfce_emitir_erro",
             extra={
