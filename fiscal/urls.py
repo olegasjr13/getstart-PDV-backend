@@ -4,6 +4,7 @@ from django.urls import path, re_path
 from fiscal.views.nfce_pre_emissao_views import pre_emissao
 from fiscal.views.nfce_views import reservar_numero
 from fiscal.views.nfce_emissao_views import emitir_nfce_view
+from fiscal.views.nfce_cancelamento_views import cancelar_nfce_view
 
 app_name = "fiscal"
 
@@ -22,4 +23,9 @@ urlpatterns = [
 
     # tolerância a barras extras
     re_path(r"^nfce/reservar-numero/*$", reservar_numero),
+
+        # nfce - cancelamento
+    path("nfce/cancelar", cancelar_nfce_view, name="nfce_cancelar"),
+    path("nfce/cancelar/", cancelar_nfce_view),
+
 ]
