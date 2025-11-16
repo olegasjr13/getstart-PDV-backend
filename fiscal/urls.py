@@ -1,6 +1,7 @@
 # fiscal/urls.py
 from django.urls import path, re_path
 
+from fiscal.views.nfce_inutilizacao_views import inutilizar_faixa_nfce_view
 from fiscal.views.nfce_pre_emissao_views import pre_emissao
 from fiscal.views.nfce_views import reservar_numero
 from fiscal.views.nfce_emissao_views import emitir_nfce_view
@@ -27,5 +28,10 @@ urlpatterns = [
         # nfce - cancelamento
     path("nfce/cancelar", cancelar_nfce_view, name="nfce_cancelar"),
     path("nfce/cancelar/", cancelar_nfce_view),
+
+        # nfce - inutilização de faixa
+    path("nfce/inutilizar", inutilizar_faixa_nfce_view, name="nfce_inutilizar"),
+    path("nfce/inutilizar/", inutilizar_faixa_nfce_view),
+
 
 ]
