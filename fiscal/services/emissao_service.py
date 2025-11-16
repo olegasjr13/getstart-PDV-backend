@@ -88,6 +88,18 @@ def _get_nfce_document_model():
     except LookupError:
         return None
 
+def _get_nfce_auditoria_model():
+    """
+    Tenta obter a model 'NfceAuditoria' do app fiscal.
+
+    Se ainda não existir (models/migrations não criados), retorna None.
+    Isso permite evoluir o domínio sem quebrar o projeto atual.
+    """
+    try:
+        return apps.get_model("fiscal", "NfceAuditoria")
+    except LookupError:
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Função de domínio principal
@@ -163,6 +175,8 @@ def emitir_nfce(
     # 4) Idempotência via NfceDocumento (quando existir model)
     # -------------------------------------------------------------------
     NfceDocumento = _get_nfce_document_model()
+    NfceAuditoria = _get_nfce_auditoria_model()
+
 
     if NfceDocumento is not None:
         existing = NfceDocumento.objects.filter(request_id=request_id).first()
@@ -195,9 +209,10 @@ def emitir_nfce(
             mensagem = sefaz_resp.get("mensagem")
             raw = sefaz_resp.get("raw") or {}
 
-            # Persistência futura no NfceDocumento (quando a model existir)
+            # Persistência no NfceDocumento (quando a model existir)
+            doc = None
             if NfceDocumento is not None:
-                NfceDocumento.objects.create(
+                doc = NfceDocumento.objects.create(
                     request_id=request_id,
                     filial=filial,
                     terminal=terminal,
@@ -209,7 +224,38 @@ def emitir_nfce(
                     xml_autorizado=xml_autorizado,
                     raw_sefaz_response=raw,
                     mensagem_sefaz=mensagem or "",
+                    ambiente=filial.ambiente,
+                    uf=filial.uf,
                     created_at=timezone.now(),
+                )
+
+            # Auditoria de emissão (quando a model existir)
+            if NfceAuditoria is not None:
+                tenant_schema = getattr(
+                    getattr(user, "tenant", None),
+                    "schema_name",
+                    None,
+                )
+                codigo_retorno = None
+                if isinstance(raw, dict) and raw.get("codigo") is not None:
+                    codigo_retorno = str(raw.get("codigo"))
+
+                NfceAuditoria.objects.create(
+                    tipo_evento=(
+                        "EMISSAO_AUTORIZADA" if status_str == "autorizada" else "EMISSAO_REJEITADA"
+                    ),
+                    nfce_documento=doc,
+                    tenant_id=tenant_schema,
+                    filial_id=filial.id,
+                    terminal_id=terminal.id,
+                    user_id=getattr(user, "id", None),
+                    request_id=request_id,
+                    codigo_retorno=codigo_retorno,
+                    mensagem_retorno=mensagem or "",
+                    xml_autorizado=xml_autorizado,
+                    raw_sefaz_response=raw,
+                    ambiente=filial.ambiente,
+                    uf=filial.uf,
                 )
 
     except Exception as exc:

@@ -9,3 +9,4 @@ class Terminal(models.Model):
     numero_atual = models.IntegerField(default=0)
     permite_suprimento = models.BooleanField(default=True)
     permite_sangria = models.BooleanField(default=True)
+    ativo = models.BooleanField(default=True)

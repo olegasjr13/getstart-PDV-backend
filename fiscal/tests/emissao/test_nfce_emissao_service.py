@@ -14,8 +14,9 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from filial.models.filial_models import Filial
 from terminal.models.terminal_models import Terminal
-from fiscal.models import NfceNumeroReserva
+from fiscal.models import NfceNumeroReserva, NfceDocumento, NfceAuditoria
 from fiscal.services.emissao_service import emitir_nfce, EmitirNfceResult
+
 
 TENANT_SCHEMA = "12345678000199"
 TENANT_HOST = "cliente-demo.localhost"
@@ -231,3 +232,225 @@ def test_emitir_nfce_happy_path():
     assert result.mensagem == "Autorizado o uso da NF-e"
     assert isinstance(result.raw_sefaz, dict)
     assert result.raw_sefaz.get("codigo") == "100"
+
+@override_settings(
+    ROOT_URLCONF="config.urls",
+    ALLOWED_HOSTS=["*", TENANT_HOST, "testserver"],
+)
+@pytest.mark.django_db(transaction=True)
+def test_emitir_nfce_cria_documento_e_auditoria():
+    """
+    Garante que a emissão:
+      - Cria um NfceDocumento persistido.
+      - Cria um registro em NfceAuditoria com EMISSAO_AUTORIZADA.
+    """
+
+    _bootstrap_public_tenant_and_domain()
+    User = get_user_model()
+
+    with schema_context(TENANT_SCHEMA):
+        # usuário operacional
+        user = User.objects.create_user(username="oper-audit", password="123456")
+
+        # filial com A1 válido
+        filial = Filial.objects.create(
+            cnpj="11111111000111",
+            nome_fantasia="Filial Auditoria",
+            uf="SP",
+            csc_id="ID",
+            csc_token="TK",
+            ambiente="homolog",
+        )
+        _ensure_a1_valid(filial)
+
+        # terminal
+        term = Terminal.objects.create(
+            identificador="T-AUD-01",
+            filial_id=filial.id,
+            serie=1,
+            numero_atual=1,
+            ativo=True,
+        )
+
+        # vínculo user x filial
+        user.userfilial_set.create(filial_id=filial.id)
+
+        # 1) reserva de número
+        reserva = NfceNumeroReserva.objects.create(
+            terminal_id=term.id,
+            filial_id=filial.id,
+            serie=term.serie,
+            numero=term.numero_atual,
+            request_id=uuid.uuid4(),
+        )
+
+        # 2) pré-emissão via endpoint
+        client = _make_client_jwt(user)
+        body = {
+            "filial_id": str(filial.id),
+            "terminal_id": str(term.id),
+            "numero": reserva.numero,
+            "serie": reserva.serie,
+            "request_id": str(reserva.request_id),
+            "itens": [],
+            "pagamentos": [],
+        }
+        resp_pre = client.post(
+            "/api/v1/fiscal/nfce/pre-emissao/",
+            data=body,
+            format="json",
+        )
+        assert resp_pre.status_code == 201, resp_pre.content
+
+        req_id = reserva.request_id
+
+    # 3) emissão via service
+    fake_sefaz = FakeSefazClient()
+    with schema_context(TENANT_SCHEMA):
+        result = emitir_nfce(
+            user=user,
+            request_id=req_id,
+            sefaz_client=fake_sefaz,
+        )
+
+        # documento deve existir
+        docs = NfceDocumento.objects.filter(request_id=req_id)
+        assert docs.count() == 1
+        doc = docs.first()
+
+        assert doc.numero == result.numero
+        assert doc.serie == result.serie
+        assert doc.filial_id == filial.id
+        assert doc.terminal_id == term.id
+        assert doc.chave_acesso == result.chave_acesso
+        assert doc.protocolo == result.protocolo
+        assert doc.status == result.status
+        assert doc.mensagem_sefaz is not None
+
+        # auditoria deve existir
+        audits = NfceAuditoria.objects.filter(
+            request_id=req_id,
+            tipo_evento="EMISSAO_AUTORIZADA",
+        )
+        assert audits.count() == 1
+        audit = audits.first()
+
+        assert audit.nfce_documento_id == doc.id
+        assert audit.filial_id == filial.id
+        assert audit.terminal_id == term.id
+        assert audit.user_id == user.id
+        assert audit.codigo_retorno == "100"
+        assert "Autorizado" in (audit.mensagem_retorno or "")
+        assert audit.ambiente == filial.ambiente
+        assert audit.uf == filial.uf
+
+
+class FakeSefazClientCounting(FakeSefazClient):
+    """
+    Variante do FakeSefazClient que conta quantas vezes a SEFAZ foi chamada.
+    Usado para validar idempotência via NfceDocumento.
+    """
+
+    def __init__(self):
+        self.call_count = 0
+
+    def emitir_nfce(self, *, pre_emissao):
+        self.call_count += 1
+        return super().emitir_nfce(pre_emissao=pre_emissao)
+
+
+@override_settings(
+    ROOT_URLCONF="config.urls",
+    ALLOWED_HOSTS=["*", TENANT_HOST, "testserver"],
+)
+@pytest.mark.django_db(transaction=True)
+def test_emitir_nfce_idempotencia_reusa_documento_sem_chamar_sefaz_duas_vezes():
+    """
+    Garante que:
+      - A primeira chamada cria NfceDocumento + chama SEFAZ.
+      - A segunda chamada com o mesmo request_id:
+          * NÃO chama SEFAZ de novo.
+          * Retorna os mesmos dados via NfceDocumento.
+    """
+
+    _bootstrap_public_tenant_and_domain()
+    User = get_user_model()
+
+    with schema_context(TENANT_SCHEMA):
+        user = User.objects.create_user(username="oper-idem", password="123456")
+
+        filial = Filial.objects.create(
+            cnpj="11111111000111",
+            nome_fantasia="Filial Idempotência",
+            uf="SP",
+            csc_id="ID",
+            csc_token="TK",
+            ambiente="homolog",
+        )
+        _ensure_a1_valid(filial)
+
+        term = Terminal.objects.create(
+            identificador="T-IDEM-01",
+            filial_id=filial.id,
+            serie=1,
+            numero_atual=1,
+            ativo=True,
+        )
+
+        user.userfilial_set.create(filial_id=filial.id)
+
+        reserva = NfceNumeroReserva.objects.create(
+            terminal_id=term.id,
+            filial_id=filial.id,
+            serie=term.serie,
+            numero=term.numero_atual,
+            request_id=uuid.uuid4(),
+        )
+
+        client = _make_client_jwt(user)
+        body = {
+            "filial_id": str(filial.id),
+            "terminal_id": str(term.id),
+            "numero": reserva.numero,
+            "serie": reserva.serie,
+            "request_id": str(reserva.request_id),
+            "itens": [],
+            "pagamentos": [],
+        }
+        resp_pre = client.post(
+            "/api/v1/fiscal/nfce/pre-emissao/",
+            data=body,
+            format="json",
+        )
+        assert resp_pre.status_code == 201, resp_pre.content
+
+        req_id = reserva.request_id
+
+    fake_sefaz = FakeSefazClientCounting()
+
+    # 1ª chamada: deve chamar SEFAZ
+    with schema_context(TENANT_SCHEMA):
+        result1 = emitir_nfce(
+            user=user,
+            request_id=req_id,
+            sefaz_client=fake_sefaz,
+        )
+
+    # 2ª chamada: mesma request_id → deve reutilizar NfceDocumento
+    with schema_context(TENANT_SCHEMA):
+        result2 = emitir_nfce(
+            user=user,
+            request_id=req_id,
+            sefaz_client=fake_sefaz,
+        )
+
+        docs = NfceDocumento.objects.filter(request_id=req_id)
+        assert docs.count() == 1  # não cria documento duplicado
+
+    # SEFAZ chamada apenas uma vez
+    assert fake_sefaz.call_count == 1
+
+    # Resultados idênticos
+    assert result1.chave_acesso == result2.chave_acesso
+    assert result1.protocolo == result2.protocolo
+    assert result1.status == result2.status
