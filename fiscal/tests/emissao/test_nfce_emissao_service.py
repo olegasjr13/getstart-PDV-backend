@@ -14,7 +14,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from filial.models.filial_models import Filial
 from terminal.models.terminal_models import Terminal
-from fiscal.models import NfceNumeroReserva, NfceDocumento, NfceAuditoria
+from fiscal.models import NfceNumeroReserva, NfceDocumento, NfceAuditoria, NfcePreEmissao
 from fiscal.services.emissao_service import emitir_nfce, EmitirNfceResult
 
 
@@ -454,3 +454,132 @@ def test_emitir_nfce_idempotencia_reusa_documento_sem_chamar_sefaz_duas_vezes():
     assert result1.chave_acesso == result2.chave_acesso
     assert result1.protocolo == result2.protocolo
     assert result1.status == result2.status
+
+class FakeSefazClientRejected(FakeSefazClient):
+    """
+    Variante do FakeSefazClient que simula uma rejeição da SEFAZ.
+    """
+
+    def emitir_nfce(self, *, pre_emissao):
+        # Simula uma resposta de rejeição, seguindo o padrão usado no FakeSefazClient
+        return {
+            "status": "rejeitada",
+            "chave_acesso": "NFe35181111111111111111550010000000011000000010",
+            "protocolo": "",
+            "xml_autorizado": None,
+            "mensagem": "Rejeição 215 - Falha na validação do schema.",
+            "raw": {
+                "codigo": 215,
+                "motivo": "Falha na validação do schema.",
+            },
+        }
+
+
+@override_settings(
+    ROOT_URLCONF="config.urls",
+    ALLOWED_HOSTS=["*", TENANT_HOST, "testserver"],
+)
+@pytest.mark.django_db(transaction=True)
+def test_emitir_nfce_rejeitada_cria_documento_e_auditoria_rejeitada():
+    """
+    Garante que, quando a SEFAZ rejeita a NFC-e:
+
+      - Um NfceDocumento é criado com status 'rejeitada'.
+      - Um registro em NfceAuditoria é criado com tipo_evento = 'EMISSAO_REJEITADA'.
+      - Codigo/mensagem de retorno refletem o erro da SEFAZ.
+    """
+
+    _bootstrap_public_tenant_and_domain()
+    User = get_user_model()
+
+    with schema_context(TENANT_SCHEMA):
+        # usuário operacional
+        user = User.objects.create_user(username="oper-rej", password="123456")
+
+        # filial com A1 válido
+        filial = Filial.objects.create(
+            cnpj="11111111000111",
+            nome_fantasia="Filial Rejeição",
+            uf="SP",
+            csc_id="ID",
+            csc_token="TK",
+            ambiente="homolog",
+        )
+        _ensure_a1_valid(filial)
+
+        # terminal
+        term = Terminal.objects.create(
+            identificador="T-REJ-01",
+            filial_id=filial.id,
+            serie=1,
+            numero_atual=1,
+            ativo=True,
+        )
+
+        # vínculo user x filial
+        user.userfilial_set.create(filial_id=filial.id)
+
+        # 1) reserva de número
+        reserva = NfceNumeroReserva.objects.create(
+            terminal_id=term.id,
+            filial_id=filial.id,
+            serie=term.serie,
+            numero=term.numero_atual,
+            request_id=uuid.uuid4(),
+        )
+
+        # 2) cria pré-emissão diretamente na base
+        pre = NfcePreEmissao.objects.create(
+            filial_id=filial.id,
+            terminal_id=term.id,
+            numero=reserva.numero,
+            serie=reserva.serie,
+            request_id=reserva.request_id,
+            payload={
+                "itens": [],
+                "pagamentos": [],
+                "cliente": None,
+            },
+        )
+
+        req_id = pre.request_id
+
+    fake_sefaz = FakeSefazClientRejected()
+
+    with schema_context(TENANT_SCHEMA):
+        result = emitir_nfce(
+            user=user,
+            request_id=req_id,
+            sefaz_client=fake_sefaz,
+        )
+
+        # Resultado de service deve refletir rejeição
+        assert result.status == "rejeitada"
+        assert result.chave_acesso.startswith("NFe")
+        assert result.protocolo in ("", None)
+
+        # Documento fiscal deve existir com status 'rejeitada'
+        docs = NfceDocumento.objects.filter(request_id=req_id)
+        assert docs.count() == 1
+        doc = docs.first()
+
+        assert doc.status == "rejeitada"
+        assert doc.chave_acesso == result.chave_acesso
+        assert doc.protocolo == result.protocolo
+        # mensagem da SEFAZ armazenada
+        assert "Rejeição 215" in (doc.mensagem_sefaz or "")
+
+        # Auditoria deve registrar EMISSAO_REJEITADA
+        audits = NfceAuditoria.objects.filter(
+            request_id=req_id,
+            tipo_evento="EMISSAO_REJEITADA",
+        )
+        assert audits.count() == 1
+        audit = audits.first()
+
+        assert audit.nfce_documento_id == doc.id
+        assert audit.filial_id == filial.id
+        assert audit.terminal_id == term.id
+        assert audit.user_id == user.id
+        assert audit.codigo_retorno == "215"
+        assert "Falha na validação do schema" in (audit.mensagem_retorno or "")
