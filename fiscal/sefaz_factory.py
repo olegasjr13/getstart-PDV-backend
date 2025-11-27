@@ -1,78 +1,104 @@
 # fiscal/sefaz_factory.py
-
 """
-Factory para criação de clients SEFAZ.
+Factory de clients SEFAZ por UF / ambiente.
 
-Por enquanto, todos os caminhos retornam MockSefazClient, mas a estrutura
-já está preparada para, no futuro, ter implementations reais por UF/ambiente:
-  - SP homolog / produção
-  - MG homolog / produção
-  - RJ homolog / produção
-  - ES homolog / produção
+Objetivos:
+- Isolar a escolha do client SEFAZ (mock ou real) em um único ponto.
+- Suportar múltiplas UFs (SP, MG, RJ, ES) e ambientes (homolog, producao).
+- Facilitar a evolução futura para clients reais por UF (SPClient, MGClient, etc).
+
+No momento, todos os ambientes/UFs usam MockSefazClient por padrão,
+e MockSefazClientAlwaysFail para cenários de falha técnica / contingência
+(simulações em testes).
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Type
 
-from filial.models.filial_models import Filial
+from filial.models import Filial  # modelo de filial do projeto
+from fiscal.sefaz_clients import (
+    MockSefazClient,
+    MockSefazClientAlwaysFail,
+    SefazClientProtocol,
+)
 
-from .sefaz_clients import MockSefazClient, SefazClientProtocol
+
+# UFs oficialmente suportadas neste MVP
+SUPPORTED_UFS = {"SP", "MG", "RJ", "ES"}
+
+# Mapeamento de UF -> classe de client.
+# Por enquanto, todas usam MockSefazClient, mas este dicionário
+# permite, no futuro, plugar implementações reais específicas por UF.
+CLIENT_CLASS_BY_UF: dict[str, Type[SefazClientProtocol]] = {
+    "SP": MockSefazClient,
+    "MG": MockSefazClient,
+    "RJ": MockSefazClient,
+    "ES": MockSefazClient,
+}
 
 
-UFType = Literal["SP", "MG", "RJ", "ES"]
-
-
-def _normalizar_ambiente(ambiente: str) -> str:
+def _normalize_ambiente(ambiente: str | None) -> str:
     """
-    Normaliza o valor de ambiente configurado na Filial para
-    algo consistente ('homolog' ou 'producao').
+    Normaliza o valor de ambiente vindo da Filial.
+
+    Aceitamos variações comuns e convertemos para:
+      - "homolog"
+      - "producao"
     """
     if not ambiente:
         return "homolog"
 
-    ambiente = ambiente.lower()
-
-    if ambiente.startswith("homolog"):
+    amb = ambiente.strip().lower()
+    if amb in {"homolog", "homologacao", "teste"}:
         return "homolog"
-
-    if ambiente.startswith("prod"):
+    if amb in {"prod", "producao", "produção"}:
         return "producao"
 
-    # fallback seguro
-    return "homolog"
+    # fallback conservador
+    return amb
 
 
-def get_sefaz_client_for_filial(filial: Filial) -> SefazClientProtocol:
+def _normalize_uf(uf: str | None) -> str:
     """
-    Retorna o client SEFAZ apropriado para a filial informada.
-
-    Regras atuais (MVP):
-      - Suportamos UF: SP, MG, RJ, ES.
-      - Ambientes: homolog / producao (normalizados).
-      - Neste momento, SEMPRE retornamos MockSefazClient,
-        mas a estrutura de decisão já está montada.
+    Normaliza a UF para duas letras maiúsculas.
     """
+    if not uf:
+        return "SP"
+    return uf.strip().upper()
 
-    uf = (filial.uf or "").upper()
-    ambiente_norm = _normalizar_ambiente(getattr(filial, "ambiente", "") or "")
 
-    # Validação mínima de UF
-    if uf not in {"SP", "MG", "RJ", "ES"}:
-        # Mantemos MockSefazClient como fallback para UFs não mapeadas.
-        # Quando forem implementados clients reais, aqui podemos levantar
-        # um erro mais explícito ou logar um aviso.
-        return MockSefazClient(ambiente=ambiente_norm, uf=uf or "SP")
+def get_sefaz_client_for_filial(
+    filial: Filial,
+    *,
+    force_technical_fail: bool = False,
+) -> SefazClientProtocol:
+    """
+    Retorna uma instância de client SEFAZ apropriada para a filial informada.
 
-    # Ponto de decisão futuro:
-    # Exemplo de como poderia ser:
-    #
-    # if uf == "SP" and ambiente_norm == "homolog":
-    #     return SefazSpHomologClient(...)
-    # if uf == "SP" and ambiente_norm == "producao":
-    #     return SefazSpProducaoClient(...)
-    # if uf == "MG" and ambiente_norm == "homolog":
-    #     ...
-    #
-    # Por enquanto, usamos MockSefazClient para todos os casos.
-    return MockSefazClient(ambiente=ambiente_norm, uf=uf)
+    Regras atuais:
+      - Ambiente é derivado de filial.ambiente, normalizado.
+      - UF é derivada de filial.uf, normalizada.
+      - Para SP/MG/RJ/ES, usamos MockSefazClient (MVP multi-UF).
+      - force_technical_fail=True força uso de MockSefazClientAlwaysFail
+        (usado em testes de contingência).
+
+    Este é o ponto único onde, futuramente, vamos plugar implementações
+    reais por UF, sem precisar alterar services/views.
+    """
+    uf = _normalize_uf(getattr(filial, "uf", None))
+    ambiente = _normalize_ambiente(getattr(filial, "ambiente", None))
+
+    if force_technical_fail:
+        return MockSefazClientAlwaysFail(ambiente=ambiente, uf=uf)
+
+    client_cls: Type[SefazClientProtocol]
+
+    if uf in CLIENT_CLASS_BY_UF:
+        client_cls = CLIENT_CLASS_BY_UF[uf]
+    else:
+        # Fallback para UFs não mapeadas explicitamente – mantém comportamento
+        # previsível mesmo se algum dado vier errado do banco.
+        client_cls = MockSefazClient
+
+    return client_cls(ambiente=ambiente, uf=uf)

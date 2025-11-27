@@ -42,7 +42,12 @@ TENANT_APPS = (
     "filial",
     "terminal",
     "fiscal",
-
+    "enderecos",
+    "produtos",
+    "metodoPagamento",
+    "tef",
+    "vendas",
+    "promocoes",
     # (demais apps nas próximas sprints: produto, codigobarras, caixa, pdv, pagamentos, sync, etc.)
 )
 

@@ -1,0 +1,41 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Pytest (todos os testes)",
+            "type": "python",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "-s",       // mostra prints
+                "-q"        // output mais limpo
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Debug Pytest (arquivo específico)",
+            "type": "python",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "produtos/tests/", 
+                "-s"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Debug Pytest (teste específico)",
+            "type": "python",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "produtos/tests/test_alguma_coisa.py::test_nome_do_teste",  // << troque aqui
+                "-s"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false
+        }
+    ]
+}

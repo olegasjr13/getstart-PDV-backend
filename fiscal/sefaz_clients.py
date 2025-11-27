@@ -205,6 +205,34 @@ class MockSefazClient(SefazClientProtocol):
             raw=raw,
         )
 
+    def emitir_nfce(self, *, pre_emissao):
+        """
+        Adaptador usado pelas services de emissão/regularização,
+        que esperam um método emitir_nfce(...) retornando um dict.
+
+        Aqui delegamos para autorizar_nfce(...) e normalizamos
+        para o formato esperado.
+        """
+        filial = getattr(pre_emissao, "filial", None)
+        numero = getattr(pre_emissao, "numero", None)
+        serie = getattr(pre_emissao, "serie", None)
+
+        resp = self.autorizar_nfce(
+            filial=filial,
+            pre_emissao=pre_emissao,
+            numero=numero,
+            serie=serie,
+        )
+
+        return {
+            "status": "autorizada" if resp.codigo == 100 else "rejeitada",
+            "chave_acesso": resp.chave_acesso,
+            "protocolo": resp.protocolo,
+            "xml_autorizado": resp.xml_autorizado,
+            "mensagem": resp.mensagem,
+            "raw": resp.raw,
+        }
+
     # -------------------------
     # Cancelamento NFC-e
     # -------------------------
@@ -319,12 +347,10 @@ class MockSefazClientAlwaysFail(MockSefazClient):
         """
         self._raise_technical_error(filial=filial)
 
-    # Este método NÃO faz parte do SefazClientProtocol, mas é aceito pela
-    # service de emissão (duck typing). Isso permite passar esse mock
-    # diretamente para a service emitir_nfce(user, request_id, sefaz_client=...).
-    def emitir_nfce(self, *, pre_emissao) -> Dict[str, Any]:
+    def emitir_nfce(self, *, pre_emissao):
         """
-        Método usado diretamente pela service emitir_nfce em testes
-        de contingência. Sempre levanta SefazTechnicalError.
+        Mesmo contrato de emitir_nfce do MockSefazClient, mas aqui
+        SEMPRE falha tecnicamente para disparar contingência.
         """
-        self._raise_technical_error(filial=None)
+        filial = getattr(pre_emissao, "filial", None)
+        self._raise_technical_error(filial=filial)
