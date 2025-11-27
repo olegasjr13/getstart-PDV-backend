@@ -21,13 +21,36 @@ from fiscal.serializers_emissao import (
     EmitirNfceInputSerializer,
     EmitirNfceOutputSerializer,
 )
-from fiscal.services.emissao_service import emitir_nfce
+
 from fiscal.models import NfcePreEmissao
 from fiscal.sefaz_factory import get_sefaz_client_for_filial
+from fiscal.services.emissao_service import emitir_nfce, _build_result_from_document
+from fiscal.models import NfcePreEmissao, NfceDocumento
+
 
 logger = logging.getLogger("pdv.fiscal")
 root_logger = logging.getLogger()
 
+def _result_to_dict(result):
+        """
+        Converte o result da emissão NFC-e em dict de forma segura.
+        Suporta:
+            - dataclass
+            - dict
+            - objetos comuns (usar __dict__)
+            - outros (fallback para string)
+        """
+        from dataclasses import is_dataclass, asdict
+
+        if is_dataclass(result):
+            return asdict(result)
+        if isinstance(result, dict):
+            return result
+        if hasattr(result, "__dict__"):
+            # remove atributos privados
+            return {k: v for k, v in result.__dict__.items() if not k.startswith("_")}
+        # fallback genérico
+        return {"raw_result": str(result)}
 
 class SefazEmitirAdapter:
     """
@@ -38,6 +61,9 @@ class SefazEmitirAdapter:
     mas por baixo usamos autorizar_nfce(filial, pre_emissao, numero, serie)
     da implementação real (MockSefazClient ou futura implementação por UF).
     """
+
+    
+
 
     def __init__(self, inner_client, filial: Filial):
         self.inner_client = inner_client
@@ -142,28 +168,56 @@ def emitir_nfce_view(request):
         )
 
         # ------------------------------------------------------------------
-        # 6) Serialização de saída
+        # 6) Serialização de saída (robusta)
         # ------------------------------------------------------------------
-        payload = getattr(result, "__dict__", None) or asdict(result)
+        # Se result não existe, criamos um dict padrão
+        if 'result' not in locals() or result is None:
+            payload = {
+                "request_id": request_id,
+                "filial_id": getattr(pre, "filial_id", None),
+                "status": "erro",
+            }
+        else:
+            payload = getattr(result, "__dict__", None) or asdict(result)
+            payload.setdefault("request_id", request_id)
+            payload.setdefault("filial_id", getattr(pre, "filial_id", None))
+            payload.setdefault("status", getattr(result, "status", "erro"))
+
+        # Campos obrigatórios do serializer
+        default_fields = {
+            "numero": None,
+            "serie": None,
+            "terminal_id": None,
+            "chave_acesso": None,
+            "protocolo": None,
+            "xml_autorizado": None,
+            "mensagem": None,
+        }
+        for k, v in default_fields.items():
+            payload.setdefault(k, v)
+
+        # Inicializa o serializer
         ser_out = EmitirNfceOutputSerializer(payload)
 
+        # Audit log consistente
         audit_extra = {
             "event": "nfce_emitir",
             "tenant_id": tenant_id,
             "user_id": getattr(user, "id", None),
-            "request_id": str(result.request_id),
-            "filial_id": result.filial_id,
-            "terminal_id": result.terminal_id,
-            "numero": result.numero,
-            "serie": result.serie,
-            "status": result.status,
-            "outcome": "success",
+            "request_id": payload.get("request_id"),
+            "filial_id": payload.get("filial_id"),
+            "terminal_id": payload.get("terminal_id"),
+            "numero": payload.get("numero"),
+            "serie": payload.get("serie"),
+            "status": payload.get("status"),
+            "outcome": "success" if payload.get("status") == "autorizada" else "failure",
         }
 
         logger.info("nfce_emitir", extra=audit_extra)
         root_logger.info("nfce_emitir", extra=audit_extra)
 
         return Response(ser_out.data, status=status.HTTP_200_OK)
+
 
     except DRFValidationError as exc:
         logger.warning(
@@ -231,6 +285,76 @@ def emitir_nfce_view(request):
         raise
 
     except Exception as exc:
+        """
+        Fallback CRÍTICO:
+
+        Se chegamos aqui, alguma coisa deu errado em um ponto que não foi
+        capturado nas exceptions anteriores (validação, not found, permissão,
+        APIException explícita).
+
+        Antes de assumir que "falhou a comunicação com a SEFAZ" (FISCAL_5999),
+        verificamos se já existe um NfceDocumento persistido para o request_id
+        informado. Se existir, usamos ELE como fonte da verdade fiscal e
+        devolvemos sucesso com base nesse documento, evitando:
+
+            - XML autorizado e PDV achando que falhou.
+            - documento em contingência pendente e PDV reprocessando errado.
+        """
+
+        # Tentativa best-effort de recuperar o request_id
+        request_id_value = None
+        try:
+            # Se o serializer já foi instanciado e validado
+            if "ser_in" in locals() and hasattr(ser_in, "validated_data"):
+                request_id_value = ser_in.validated_data.get("request_id")
+        except Exception:
+            request_id_value = None
+
+        if request_id_value is None:
+            # fallback: tenta pegar direto do corpo da requisição
+            request_id_value = request.data.get("request_id")
+
+        # Tentamos o fallback fiscal SOMENTE se temos um request_id válido
+        if request_id_value:
+            try:
+                doc = NfceDocumento.objects.filter(
+                    request_id=request_id_value
+                ).order_by("-created_at").first()
+            except Exception:
+                doc = None
+
+            if doc is not None:
+                # Construímos o DTO a partir do documento persistido
+                result = _build_result_from_document(doc)
+                payload = getattr(result, "__dict__", None) or asdict(result)
+                ser_out = EmitirNfceOutputSerializer(payload)
+
+                audit_extra = {
+                    "event": "nfce_emitir",
+                    "tenant_id": tenant_id,
+                    "user_id": getattr(user, "id", None),
+                    "request_id": str(getattr(result, "request_id", request_id)),
+                    "filial_id": getattr(result, "filial_id", getattr(pre, "filial_id", None)),
+                    "terminal_id": getattr(result, "terminal_id", None),
+                    "numero": getattr(result, "numero", None),
+                    "serie": getattr(result, "serie", None),
+                    "status": getattr(result, "status", "erro"),
+                    "outcome": "success" if result else "failure",
+                }
+
+                logger.exception(
+                    "nfce_emitir_erro_pos_persistencia",
+                    extra={**audit_extra, "error": str(exc)},
+                )
+                root_logger.exception(
+                    "nfce_emitir_erro_pos_persistencia",
+                    extra={**audit_extra, "error": str(exc)},
+                )
+
+                # Aqui NÃO levantamos erro: devolvemos o estado fiscal real.
+                return Response(ser_out.data, status=status.HTTP_200_OK)
+
+        # Se não foi possível localizar um documento, mantemos o comportamento original
         logger.exception(
             "nfce_emitir_erro",
             extra={
@@ -256,3 +380,4 @@ def emitir_nfce_view(request):
                 "message": "Erro ao comunicar com a SEFAZ.",
             }
         )
+

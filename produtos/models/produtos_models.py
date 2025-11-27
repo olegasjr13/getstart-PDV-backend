@@ -258,16 +258,50 @@ class Produto(models.Model):
         """
         super().clean()
 
+        # Fator de conversão deve ser > 0
         if self.fator_conversao_tributavel <= 0:
             raise ValidationError("fator_conversao_tributavel deve ser maior que zero.")
 
-        for field in ["aliquota_icms", "aliquota_pis", "aliquota_cofins", "aliquota_ipi",
-                      "aliquota_cbs_especifica", "aliquota_ibs_especifica"]:
+        # Alíquotas sempre entre 0% e 100%
+        for field in [
+            "aliquota_icms",
+            "aliquota_pis",
+            "aliquota_cofins",
+            "aliquota_ipi",
+            "aliquota_cbs_especifica",
+            "aliquota_ibs_especifica",
+        ]:
             valor = getattr(self, field)
             if valor < 0 or valor > 100:
+                raise ValidationError({field: "Alíquota deve estar entre 0% e 100%."})
+
+        # NCM obrigatório para produtos ativos utilizados em NF-e/NFC-e
+        if self.ativo and not self.ncm_id:
+            raise ValidationError(
+                {"ncm": "NCM é obrigatório para produtos ativos utilizados em NF-e/NFC-e."}
+            )
+
+        # Validação básica de CFOP quando informado
+        for cfop_field in ["cfop_venda_dentro_estado", "cfop_venda_fora_estado"]:
+            cfop = getattr(self, cfop_field)
+            if cfop and (len(cfop) != 4 or not cfop.isdigit()):
                 raise ValidationError(
-                    {field: "Alíquota deve estar entre 0% e 100%."}
+                    {cfop_field: "CFOP deve ter exatamente 4 dígitos numéricos."}
                 )
+
+        # Validação básica de códigos CSOSN/CST (somente dígitos)
+        if self.csosn_icms and not self.csosn_icms.isdigit():
+            raise ValidationError(
+                {"csosn_icms": "CSOSN/CST ICMS deve conter apenas dígitos."}
+            )
+
+        for c_field in ["cst_pis", "cst_cofins", "cst_ipi"]:
+            codigo = getattr(self, c_field)
+            if codigo and (not codigo.isdigit() or len(codigo) not in (2, 3)):
+                raise ValidationError(
+                    {c_field: "CST deve conter apenas dígitos (2 ou 3 caracteres)."}
+                )
+
 
     # -------------------------
     # CEST via NCM
@@ -341,3 +375,57 @@ class Produto(models.Model):
             .first()
         )
         return cod
+    
+    def get_parametros_fiscais_base(self):
+        """
+        Consolida os parâmetros fiscais básicos do produto.
+
+        Neste momento, utiliza apenas os campos do próprio Produto e o código
+        do NCM associado (quando houver). Em próximos épicos, este método
+        poderá ser estendido para considerar regras de NCM, UF, tipo de
+        operação e regime tributário.
+        """
+        ncm = self.ncm if getattr(self, "ncm_id", None) else None
+
+        return {
+            "ncm_codigo": ncm.codigo if ncm else None,
+            "origem_mercadoria": self.origem_mercadoria,
+            "cfop_venda_dentro_estado": self.cfop_venda_dentro_estado,
+            "cfop_venda_fora_estado": self.cfop_venda_fora_estado,
+            "csosn_icms": self.csosn_icms,
+            "cst_pis": self.cst_pis,
+            "cst_cofins": self.cst_cofins,
+            "cst_ipi": self.cst_ipi,
+            "aliquota_icms": self.aliquota_icms,
+            "aliquota_pis": self.aliquota_pis,
+            "aliquota_cofins": self.aliquota_cofins,
+            "aliquota_ipi": self.aliquota_ipi,
+            "aliquota_cbs": self.aliquota_cbs_especifica,
+            "aliquota_ibs": self.aliquota_ibs_especifica,
+        }
+
+    def get_cests_ativos(self):
+        """
+        Retorna a lista de CESTs ativos vinculados ao NCM do produto.
+        """
+        if not getattr(self, "ncm_id", None):
+            return []
+        # Assume que o relacionamento NCM -> CEST é via related_name 'cests'
+        return list(self.ncm.cests.filter(ativo=True))
+
+    def get_cest_principal(self):
+        """
+        Retorna o CEST considerado principal para este produto.
+
+        Regra atual (simples, mas determinística):
+        - se houver apenas um CEST ativo para o NCM: retorna ele;
+        - se houver vários: retorna o de menor código;
+        - se não houver: retorna None.
+        """
+        cests = self.get_cests_ativos()
+        if not cests:
+            return None
+        if len(cests) == 1:
+            return cests[0]
+        return sorted(cests, key=lambda c: c.codigo)[0]
+

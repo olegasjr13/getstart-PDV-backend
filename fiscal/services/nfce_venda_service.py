@@ -437,3 +437,78 @@ def emitir_nfce_para_venda(
     )
 
     return result
+
+def atualizar_venda_apos_emissao_nfce(*, venda, documento):
+    """
+    Sincroniza o resultado da emissão NFC-e (NfceDocumento) com a Venda de origem.
+    """
+
+    Venda = apps.get_model("vendas", "Venda")
+    NfceDocumento = apps.get_model("fiscal", "NfceDocumento")
+
+    if not isinstance(documento, NfceDocumento):
+        raise TypeError("documento deve ser uma instância de fiscal.NfceDocumento")
+
+    with transaction.atomic():
+        # 🔧 CORRIGIDO: removido select_related("nfce_documento")
+        venda = Venda.objects.select_for_update().get(pk=venda.pk)
+
+        # Sempre amarra a venda ao documento recebido
+        venda.nfce_documento = documento
+
+        status_doc = (documento.status or "").lower().strip()
+        em_contingencia = bool(getattr(documento, "em_contingencia", False))
+        mensagem_sefaz = getattr(documento, "mensagem_sefaz", "") or ""
+
+        codigo_erro = None
+        raw = getattr(documento, "raw_sefaz_response", None)
+        if isinstance(raw, dict):
+            codigo_erro = raw.get("codigo") or raw.get("cStat")
+
+        if em_contingencia:
+            venda.status = VendaStatus.ERRO_FISCAL
+            venda.codigo_erro_fiscal = codigo_erro
+            venda.mensagem_erro_fiscal = (
+                mensagem_sefaz
+                or "Documento emitido em contingência pendente de transmissão à SEFAZ."
+            )
+        else:
+            if status_doc == "autorizada":
+                venda.status = VendaStatus.FINALIZADA
+                venda.codigo_erro_fiscal = None
+                venda.mensagem_erro_fiscal = None
+            else:
+                venda.status = VendaStatus.ERRO_FISCAL
+                venda.codigo_erro_fiscal = codigo_erro
+                venda.mensagem_erro_fiscal = (
+                    mensagem_sefaz or "Emissão NFC-e não autorizada."
+                )
+
+        update_fields = [
+            "status",
+            "codigo_erro_fiscal",
+            "mensagem_erro_fiscal",
+            "nfce_documento",
+        ]
+        if hasattr(venda, "updated_at"):
+            venda.updated_at = venda.updated_at
+            update_fields.append("updated_at")
+
+        venda.save(update_fields=update_fields)
+
+        logger.info(
+            "nfce_atualizar_venda",
+            extra={
+                "event": "nfce_atualizar_venda",
+                "tenant_id": getattr(venda, "tenant_id", None),
+                "venda_id": str(venda.id),
+                "nfce_documento_id": str(documento.id),
+                "status_venda": venda.status,
+                "status_nfce": documento.status,
+                "em_contingencia": em_contingencia,
+                "codigo_erro_fiscal": venda.codigo_erro_fiscal,
+            },
+        )
+
+        return venda
+

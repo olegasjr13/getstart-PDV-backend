@@ -99,8 +99,9 @@ def pre_emissao(request):
     # -------------------------------------------------------------------
     # 5) Validação do certificado A1 da filial
     # -------------------------------------------------------------------
-    filial = Filial.objects.only("id", "a1_expires_at").get(id=filial_id)
-    _assert_a1_valid(filial)
+    _assert_a1_valid(Filial.objects.get(id=filial_id))
+    
+
 
     # -------------------------------------------------------------------
     # 6) Idempotência da pré-emissão por request_id

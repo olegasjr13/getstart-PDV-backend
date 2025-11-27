@@ -25,7 +25,7 @@ def extract_results(data):
 
 
 @pytest.mark.usefixtures("two_tenants_with_admins")
-def test_admin_tenant1_cria_grupo_visivel_so_no_tenant1(client):
+def test_admin_tenant1_cria_grupo_visivel_so_no_tenant1(two_tenants_with_admins):
     """
     Admin do tenant1 cria grupo de produtos.
     - Deve aparecer no tenant1.

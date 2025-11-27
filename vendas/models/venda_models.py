@@ -235,6 +235,15 @@ class Venda(BaseModel):
         help_text="Última mensagem de erro fiscal resumida.",
     )
 
+    nfce_documento = models.ForeignKey(
+        "fiscal.NfceDocumento",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="vendas_origem",
+        help_text="Documento NFC-e gerado para esta venda, quando aplicável.",
+    )
+
     observacoes = models.TextField(blank=True, null=True)
 
     data_abertura = models.DateTimeField(auto_now_add=True)

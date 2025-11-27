@@ -6,6 +6,7 @@ from django.utils import timezone
 from terminal.models.terminal_models import Terminal
 from filial.models.filial_models import Filial
 from fiscal.models import NfceNumeroReserva
+from rest_framework.exceptions import PermissionDenied
 
 # Códigos de erro do domínio
 ERR_A1_EXPIRED = "FISCAL_3001"
@@ -24,12 +25,20 @@ class ReservaNumeroResult:
 
 def _assert_a1_valid(filial: Filial):
     """
-    Bloqueia a pré-emissão se o A1 estiver expirado.
+    Bloqueia a emissão se o A1 estiver expirado.
     """
-    expires = getattr(filial, "a1_expires_at", None)
-    if not expires or expires <= timezone.now():
-        from rest_framework.exceptions import PermissionDenied
-        raise PermissionDenied({"code": ERR_A1_EXPIRED, "message": "Certificado A1 expirado. Emissão bloqueada."})
+    cert = getattr(filial, "certificado_a1", None)
+    if not cert:
+        raise PermissionDenied({
+            "code": ERR_A1_EXPIRED,
+            "message": "Filial não possui certificado A1 configurado."
+        })
+
+    if not cert.a1_expires_at or cert.a1_expires_at <= timezone.now():
+        raise PermissionDenied({
+            "code": ERR_A1_EXPIRED,
+            "message": "Certificado A1 expirado. Emissão bloqueada."
+        })
 
 def reservar_numero_nfce(*, user, terminal_id, serie: int, request_id) -> ReservaNumeroResult:
     """

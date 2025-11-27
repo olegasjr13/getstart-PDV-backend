@@ -61,6 +61,19 @@ class FilialFiscalConfig(models.Model):
         help_text="Tipo de contribuinte de ICMS da filial.",
     )
 
+    aliquota_pis = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=0.00,
+        help_text="Alíquota de PIS (%) aplicada nas operações da filial.",
+    )
+    aliquota_cofins = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=0.00,
+        help_text="Alíquota de COFINS (%) aplicada nas operações da filial.",
+    )
+
     created_at = models.DateTimeField(
         auto_now_add=True,
     )

@@ -7,6 +7,7 @@ from django.utils import timezone
 from fiscal.models import NfceNumeroReserva
 from fiscal.models.pre_emissao_models import NfcePreEmissao
 from filial.models.filial_models import Filial
+from fiscal.services.numero_service import _assert_a1_valid
 
 logger = logging.getLogger("pdv.fiscal")
 
@@ -27,12 +28,6 @@ class PreEmissaoResult:
     created_at: str
 
 
-def _assert_a1_valid(filial):
-    if not filial.a1_expires_at or filial.a1_expires_at <= timezone.now():
-        from rest_framework.exceptions import PermissionDenied
-        raise PermissionDenied({"code": ERR_A1_EXPIRED, "message": "Certificado A1 expirado."})
-
-
 def criar_pre_emissao(*, user, request_id, payload) -> PreEmissaoResult:
     """
     Regras:
@@ -50,9 +45,8 @@ def criar_pre_emissao(*, user, request_id, payload) -> PreEmissaoResult:
         raise NotFound({"code": ERR_RESERVA_NAO_ENCONTRADA, "message": "Número não reservado."})
 
     # 2) Valida A1
-    filial = Filial.objects.only("a1_expires_at").get(id=reserva.filial_id)
-    _assert_a1_valid(filial)
-
+    _assert_a1_valid(Filial)
+    
     # 3) Idempotência — se já existe pré-emissão, retorna
     try:
         pre = NfcePreEmissao.objects.get(request_id=request_id)
