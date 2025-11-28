@@ -18,6 +18,15 @@ class NfceNumeroReserva(models.Model):
     numero = models.PositiveIntegerField()  # número reservado
     request_id = models.UUIDField(unique=True)  # idempotência por request_id (único no schema)
 
+    
+
+    # Dados da resposta SEFAZ (via parceiro fiscal)
+    codigo_retorno = models.CharField(max_length=10, blank=True, null=True)
+    mensagem_retorno = models.TextField(blank=True, null=True)
+
+    xml_autorizado = models.TextField(blank=True, null=True)
+    raw_sefaz_response = models.JSONField(blank=True, null=True)
+
     reserved_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -67,6 +76,19 @@ class NfceDocumento(models.Model):
 
     # Idempotência: mesmo request_id → mesmo documento
     request_id = models.UUIDField(unique=True)
+
+    # Payload enviado ao parceiro fiscal (XML/JSON) e hash para idempotência/auditoria
+    payload_enviado = models.JSONField(
+        blank=True,
+        null=True,
+        help_text="Payload bruto enviado ao parceiro fiscal (XML/JSON).",
+    )
+    hash_payload_enviado = models.CharField(
+        max_length=64,
+        blank=True,
+        null=True,
+        help_text="Hash SHA256 do payload_enviado, usado para idempotência e reconciliação.",
+    )
 
     # XML autorizado devolvido pela SEFAZ (quando existir)
     xml_autorizado = models.TextField(blank=True, null=True)
@@ -146,7 +168,7 @@ class NfceAuditoria(models.Model):
     request_id = models.UUIDField()
 
     # Dados da resposta SEFAZ
-    codigo_retorno = models.CharField(max_length=10, blank=True, null=True)
+    codigo_retorno = models.CharField(max_length=128, blank=True, null=True)
     mensagem_retorno = models.TextField(blank=True, null=True)
 
     xml_autorizado = models.TextField(blank=True, null=True)

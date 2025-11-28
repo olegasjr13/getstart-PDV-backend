@@ -9,6 +9,7 @@ from django.db import transaction
 
 from vendas.models import Venda, VendaPagamento, StatusPagamento
 from vendas.models.venda_models import VendaStatus
+from vendas.services.venda_state_machine import VendaStateMachine  # NOVO IMPORT
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ def recalcular_totais_pagamento(*, venda: Venda, salvar: bool = True) -> None:
     - Se saldo_a_pagar <= 0 (venda totalmente paga):
         - Se status estiver em {ABERTA, AGUARDANDO_PAGAMENTO},
           passa para PAGAMENTO_CONFIRMADO.
+
+    Agora usando VendaStateMachine para alterar o status (sem salvar diretamente).
     """
     from decimal import Decimal as D
 
@@ -65,8 +68,9 @@ def recalcular_totais_pagamento(*, venda: Venda, salvar: bool = True) -> None:
     # Atualiza status da venda de acordo com a situação de pagamento
     # ---------------------------------------------------------
     status_original = venda.status
-
     saldo_atual = venda.saldo_a_pagar
+
+    update_fields = ["total_pago", "total_troco"]
 
     if venda.total_pago <= D("0.00"):
         # Nenhum pagamento efetivo ainda: não alteramos o status
@@ -76,19 +80,25 @@ def recalcular_totais_pagamento(*, venda: Venda, salvar: bool = True) -> None:
             venda.id,
             venda.status,
         )
-        update_fields = ["total_pago", "total_troco"]
     else:
         # Já houve pelo menos um pagamento autorizado
         if saldo_atual > D("0.00"):
             # Ainda falta pagar uma parte da venda
             if venda.status == VendaStatus.ABERTA:
-                venda.status = VendaStatus.AGUARDANDO_PAGAMENTO
+                VendaStateMachine.para_aguardando_pagamento(
+                    venda,
+                    motivo="Pagamento parcial registrado.",
+                    save=False,
+                )
         else:
             # saldo_a_pagar <= 0 => venda totalmente paga
             if venda.status in {VendaStatus.ABERTA, VendaStatus.AGUARDANDO_PAGAMENTO}:
-                venda.status = VendaStatus.PAGAMENTO_CONFIRMADO
+                VendaStateMachine.para_pagamento_confirmado(
+                    venda,
+                    motivo="Venda totalmente paga.",
+                    save=False,
+                )
 
-        update_fields = ["total_pago", "total_troco"]
         if venda.status != status_original:
             update_fields.append("status")
 
@@ -102,4 +112,3 @@ def recalcular_totais_pagamento(*, venda: Venda, salvar: bool = True) -> None:
         )
 
     venda.save(update_fields=update_fields)
-

@@ -441,16 +441,30 @@ def emitir_nfce_para_venda(
 def atualizar_venda_apos_emissao_nfce(*, venda, documento):
     """
     Sincroniza o resultado da emissão NFC-e (NfceDocumento) com a Venda de origem.
+
+    Responsabilidades:
+      - Vincular a venda ao NfceDocumento gerado;
+      - Atualizar o status da venda com base no status do documento fiscal;
+      - Propagar o código/mensagem fiscal relevantes para os campos
+        codigo_erro_fiscal / mensagem_erro_fiscal da venda;
+      - Diferenciar claramente:
+        * Autorizada   → FINALIZADA
+        * Contingência → AGUARDANDO_EMISSAO_FISCAL
+        * Rejeitada    → ERRO_FISCAL
     """
+    from django.db import transaction
+    from django.apps import apps
 
     Venda = apps.get_model("vendas", "Venda")
     NfceDocumento = apps.get_model("fiscal", "NfceDocumento")
+    NfceAuditoria = apps.get_model("fiscal", "NfceAuditoria")
+    from vendas.models.venda_models import VendaStatus
 
     if not isinstance(documento, NfceDocumento):
         raise TypeError("documento deve ser uma instância de fiscal.NfceDocumento")
 
     with transaction.atomic():
-        # 🔧 CORRIGIDO: removido select_related("nfce_documento")
+        # Lock pessimista na venda para evitar race conditions
         venda = Venda.objects.select_for_update().get(pk=venda.pk)
 
         # Sempre amarra a venda ao documento recebido
@@ -458,31 +472,59 @@ def atualizar_venda_apos_emissao_nfce(*, venda, documento):
 
         status_doc = (documento.status or "").lower().strip()
         em_contingencia = bool(getattr(documento, "em_contingencia", False))
-        mensagem_sefaz = getattr(documento, "mensagem_sefaz", "") or ""
+        mensagem_sefaz_doc = getattr(documento, "mensagem_sefaz", "") or ""
 
-        codigo_erro = None
+        # Recupera a última auditoria associada a este documento
+        ultima_auditoria = (
+            NfceAuditoria.objects.filter(nfce_documento=documento)
+            .order_by("-created_at")
+            .first()
+        )
+
+        codigo_retorno = getattr(ultima_auditoria, "codigo_retorno", None)
+        mensagem_retorno = getattr(ultima_auditoria, "mensagem_retorno", None)
+
+        # Fallback se auditoria estiver ausente (não deveria, mas é defensivo)
         raw = getattr(documento, "raw_sefaz_response", None)
-        if isinstance(raw, dict):
-            codigo_erro = raw.get("codigo") or raw.get("cStat")
+        if codigo_retorno is None and isinstance(raw, dict):
+            codigo_retorno = raw.get("codigo") or raw.get("cStat") or raw.get("codigo_retorno")
+        if not mensagem_retorno:
+            mensagem_retorno = mensagem_sefaz_doc
 
-        if em_contingencia:
-            venda.status = VendaStatus.ERRO_FISCAL
-            venda.codigo_erro_fiscal = codigo_erro
-            venda.mensagem_erro_fiscal = (
-                mensagem_sefaz
-                or "Documento emitido em contingência pendente de transmissão à SEFAZ."
-            )
-        else:
-            if status_doc == "autorizada":
-                venda.status = VendaStatus.FINALIZADA
-                venda.codigo_erro_fiscal = None
-                venda.mensagem_erro_fiscal = None
+        # Regra para considerar "autorizado" (status + códigos clássicos 100/150)
+        autorizado = status_doc in {"autorizada", "aut"} or codigo_retorno in {"100", "150"}
+
+        if autorizado and not em_contingencia:
+            # Venda fiscalmente concluída
+            venda.status = VendaStatus.FINALIZADA
+            venda.codigo_erro_fiscal = None
+            venda.mensagem_erro_fiscal = None
+
+        elif em_contingencia:
+            # Contingência técnica: venda pendente de regularização,
+            # mas vinculada ao documento fiscal em contingência.
+            if hasattr(VendaStatus, "AGUARDANDO_EMISSAO_FISCAL"):
+                venda.status = VendaStatus.AGUARDANDO_EMISSAO_FISCAL
             else:
-                venda.status = VendaStatus.ERRO_FISCAL
-                venda.codigo_erro_fiscal = codigo_erro
-                venda.mensagem_erro_fiscal = (
-                    mensagem_sefaz or "Emissão NFC-e não autorizada."
-                )
+                # Fallback: mantém o status atual se não existir esse enum
+                venda.status = venda.status
+
+            venda.codigo_erro_fiscal = codigo_retorno or "TECH_CONTINGENCIA"
+            venda.mensagem_erro_fiscal = (
+                mensagem_retorno
+                or mensagem_sefaz_doc
+                or "Emissão NFC-e em contingência; regularização pendente."
+            )
+
+        else:
+            # Qualquer outra situação não autorizada ou ambígua é tratada como erro fiscal.
+            venda.status = VendaStatus.ERRO_FISCAL
+            venda.codigo_erro_fiscal = codigo_retorno or "FISCAL_ERROR"
+            venda.mensagem_erro_fiscal = (
+                mensagem_retorno
+                or mensagem_sefaz_doc
+                or "Emissão NFC-e não autorizada."
+            )
 
         update_fields = [
             "status",
@@ -491,7 +533,6 @@ def atualizar_venda_apos_emissao_nfce(*, venda, documento):
             "nfce_documento",
         ]
         if hasattr(venda, "updated_at"):
-            venda.updated_at = venda.updated_at
             update_fields.append("updated_at")
 
         venda.save(update_fields=update_fields)
@@ -506,9 +547,12 @@ def atualizar_venda_apos_emissao_nfce(*, venda, documento):
                 "status_venda": venda.status,
                 "status_nfce": documento.status,
                 "em_contingencia": em_contingencia,
+                "codigo_retorno": codigo_retorno,
                 "codigo_erro_fiscal": venda.codigo_erro_fiscal,
             },
         )
 
         return venda
+
+
 

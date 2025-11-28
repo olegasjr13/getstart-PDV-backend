@@ -48,6 +48,7 @@ TENANT_APPS = (
     "tef",
     "vendas",
     "promocoes",
+    "caixa",
     # (demais apps nas próximas sprints: produto, codigobarras, caixa, pdv, pagamentos, sync, etc.)
 )
 

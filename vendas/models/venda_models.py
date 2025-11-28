@@ -6,6 +6,7 @@ from decimal import Decimal
 from django.db import models
 from django.core.exceptions import ValidationError
 
+from caixa.models.caixa_models import Caixa
 from commons.models.base_models import BaseModel
 from filial.models.filial_models import Filial
 from terminal.models.terminal_models import Terminal
@@ -104,6 +105,15 @@ class Venda(BaseModel):
         on_delete=models.PROTECT,
         related_name="vendas_operadas",
         help_text="Usuário operador que abriu/fechou a venda.",
+    )
+
+    caixa = models.ForeignKey(
+        Caixa,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="vendas",
+        help_text="Caixa em que a venda foi realizada.",
     )
 
     tipo_venda = models.CharField(

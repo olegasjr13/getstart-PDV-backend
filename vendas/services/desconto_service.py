@@ -131,12 +131,6 @@ class DescontoService:
                 limite_contexto = v
                 break
         
-        print("DEBUG PERFIL OPERADOR:", operador, operador.perfil if hasattr(operador, "perfil") else "SEM PERFIL")
-        print("DEBUG PERFIL APROVADOR:", aprovador, aprovador.perfil if aprovador and hasattr(aprovador, "perfil") else "SEM PERFIL")
-        print("DEBUG terminal:", terminal)
-        print("DEBUG Filial:", filial)
-        print("DEBUG operador:", operador, operador.perfil.desconto_maximo_percentual)
-        
         return LimitesDescontoContexto(
             limite_produto=limite_produto,
             limite_metodo_pagamento=limite_metodo_pagamento,

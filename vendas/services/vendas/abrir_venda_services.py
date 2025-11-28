@@ -7,7 +7,9 @@ from decimal import Decimal
 from typing import Optional
 
 from django.db import transaction
+from django.forms import ValidationError
 
+from caixa.models.caixa_models import Caixa
 from filial.models.filial_models import Filial
 from terminal.models.terminal_models import Terminal
 from usuario.models.usuario_models import User
@@ -44,6 +46,26 @@ def abrir_venda(
         documento_fiscal_tipo,
     )
 
+    caixa_aberto = (
+        Caixa.objects.filter(
+            filial=filial,
+            terminal=terminal,
+            status=Caixa.Status.ABERTO,
+        )
+        .order_by("-aberto_em")
+        .first()
+    )
+
+    if caixa_aberto is None:
+        logger.info(
+            "Erro ao abrir venda: não há caixa aberto para o terminal. filial_id=%s terminal_id=%s",
+            filial.id,
+            terminal.id,
+        )
+        raise ValidationError("Não há caixa aberto para este terminal.")
+
+
+
     venda = Venda(
         filial=filial,
         terminal=terminal,
@@ -58,6 +80,7 @@ def abrir_venda(
         total_troco=Decimal("0.00"),
         request_id=request_id,
         observacoes=observacoes,
+        caixa=caixa_aberto,
     )
 
     venda.clean()

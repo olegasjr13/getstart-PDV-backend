@@ -11,6 +11,7 @@ from django.db import transaction
 
 from vendas.models.venda_models import Venda, VendaStatus
 from usuario.models.usuario_models import User
+from vendas.services.venda_state_machine import VendaStateMachine  # NOVO IMPORT
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +104,16 @@ def finalizar_venda_e_emitir_nfce(
             )
             return None
 
-        # Atualiza para AGUARDANDO_EMISSAO_FISCAL
         status_original = venda_db.status
-        venda_db.status = VendaStatus.AGUARDANDO_EMISSAO_FISCAL
+
+        # Atualiza para AGUARDANDO_EMISSAO_FISCAL via state machine (sem salvar ainda)
+        VendaStateMachine.para_aguardando_emissao_fiscal(
+            venda_db,
+            motivo="Preparando emissão NFC-e.",
+            save=False,
+        )
+
+        # Zera campos de erro fiscal (se existirem)
         if hasattr(venda_db, "codigo_erro_fiscal"):
             venda_db.codigo_erro_fiscal = None
         if hasattr(venda_db, "mensagem_erro_fiscal"):
@@ -145,7 +153,12 @@ def finalizar_venda_e_emitir_nfce(
                 exc,
             )
 
-            venda_db.status = VendaStatus.ERRO_FISCAL
+            # Via state machine (sem salvar aqui)
+            VendaStateMachine.para_erro_fiscal(
+                venda_db,
+                motivo="Falha interna ao emitir NFC-e.",
+                save=False,
+            )
             if hasattr(venda_db, "mensagem_erro_fiscal"):
                 venda_db.mensagem_erro_fiscal = (
                     "Falha interna ao emitir NFC-e. Ver logs."
@@ -160,11 +173,13 @@ def finalizar_venda_e_emitir_nfce(
             erro_interno = exc
         else:
             # Sucesso na chamada fiscal -> decide status com base no retorno
-            status_nfce = getattr(nfce_doc, "status", None)
+            status_nfce_raw = getattr(nfce_doc, "status", None)
+            status_nfce = (status_nfce_raw or "").upper()
+
             codigo_erro = getattr(nfce_doc, "codigo_erro", None)
             mensagem_erro = getattr(nfce_doc, "mensagem_erro", None)
 
-            if status_nfce in ("AUTORIZADA", "AUT"):
+            if status_nfce in {"AUTORIZADA", "AUT"}:
                 venda_db.status = VendaStatus.FINALIZADA
                 if hasattr(venda_db, "codigo_erro_fiscal"):
                     venda_db.codigo_erro_fiscal = None

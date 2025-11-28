@@ -1,7 +1,6 @@
 # conftest.py (na raiz do projeto)
 
 import logging
-from typing import Callable, Tuple
 
 import pytest
 from django.apps import apps

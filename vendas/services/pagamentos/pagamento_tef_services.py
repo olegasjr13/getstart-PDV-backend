@@ -15,8 +15,7 @@ from terminal.models.terminal_models import Terminal
 from usuario.models.usuario_models import User
 from tef.clients.base import TefClientProtocol, TefIniciarRequest, TefIniciarResult
 
-
-from vendas.services.pagamentos.iniciar_pagamento_service import iniciar_pagamento  # ajuste o path conforme teu projeto
+from vendas.services.pagamentos.iniciar_pagamento_service import iniciar_pagamento  # mantém o path
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +36,7 @@ def iniciar_pagamento_tef_com_cliente(
     Passos:
     - Garante que a venda está em status que permite pagamento.
     - Garante que o método utiliza_tef=True.
+    - Garante que o terminal permite TEF (terminal.permite_tef == True).
     - Garante que não há outro pagamento TEF PENDENTE para a mesma venda.
     - Cria o VendaPagamento PENDENTE via iniciar_pagamento(..., usar_tef=True).
     - Chama tef_client.iniciar_transacao(...) para iniciar a transação no TEF.
@@ -50,6 +50,15 @@ def iniciar_pagamento_tef_com_cliente(
         raise ValidationError("Venda não está em status que permita iniciar pagamento TEF.")
 
     terminal = terminal or venda.terminal
+
+    # NOVO: validação de terminal.permite_tef (requisito do sprint)
+    if not getattr(terminal, "permite_tef", False):
+        logger.info(
+            "Tentativa de iniciar TEF em terminal que não permite TEF. venda_id=%s terminal_id=%s",
+            venda.id,
+            terminal.id,
+        )
+        raise ValidationError("O terminal informado não está habilitado para TEF.")
 
     # Impede múltiplos TEFs pendentes para a mesma venda
     existe_pendente = venda.pagamentos.filter(
@@ -143,3 +152,83 @@ def iniciar_pagamento_tef_com_cliente(
     # Importante: o status do pagamento continua PENDENTE aqui.
     # Só o registrar_pagamento_service vai marcar AUTORIZADO/NEGADO depois.
     return pagamento
+
+def registrar_auditoria_tef(*, pagamento, retorno):
+    from django.apps import apps
+    AuditoriaTef = apps.get_model("pagamentos", "AuditoriaTef")
+    AuditoriaTef.objects.create(
+        pagamento=pagamento,
+        venda_id=pagamento.venda_id,
+        tenant_id=pagamento.venda.tenant_id,
+        raw=retorno
+    )
+
+
+def processar_retorno_tef(*, pagamento, retorno_tef):
+    """
+    Processa o retorno do TEF (DLL, socket, POS, ACI, PayGo etc.)
+    e sincroniza com o modelo de Pagamento e Venda.
+
+    retorno_tef deve conter:
+      - status: 'APROVADO', 'NEGADO', 'PENDENTE', 'TIMEOUT', 'DUPLICADO'
+      - nsu
+      - autorizacao
+      - bin
+      - bandeira
+      - via_cliente
+      - via_estabelecimento
+      - codigo_rede / mensagem / raw
+    """
+    from django.db import transaction
+    from django.apps import apps
+
+    Pagamento = apps.get_model("pagamentos", "Pagamento")
+    Venda = apps.get_model("vendas", "Venda")
+
+    from vendas.models.venda_models import VendaStatus
+
+    if not isinstance(pagamento, Pagamento):
+        raise TypeError("pagamento deve ser uma instância de Pagamento")
+
+    with transaction.atomic():
+        pagamento = Pagamento.objects.select_for_update().get(pk=pagamento.pk)
+        venda = pagamento.venda
+
+        status = (retorno_tef.get("status") or "").upper()
+
+        if status == "APROVADO":
+            pagamento.status = StatusPagamento.AUTORIZADO
+            pagamento.nsu = retorno_tef.get("nsu")
+            pagamento.codigo_autorizacao = retorno_tef.get("autorizacao")
+            pagamento.via_cliente = retorno_tef.get("via_cliente")
+            pagamento.via_estabelecimento = retorno_tef.get("via_estabelecimento")
+            pagamento.bandeira = retorno_tef.get("bandeira")
+            pagamento.raw_tef = retorno_tef
+
+            # Venda só avança para pagamento confirmado SE TODOS os pagamentos forem aprovados
+            if venda.tem_todos_pagamentos_confirmados():
+                venda.status = VendaStatus.PAGAMENTO_CONFIRMADO
+
+        elif status == "NEGADO":
+            pagamento.status = StatusPagamento.NEGADO
+            venda.status = VendaStatus.PAGAMENTO_NEGADO
+
+        elif status in {"TIMEOUT", "PENDENTE"}:
+            pagamento.status = StatusPagamento.PENDENTE
+            venda.status = VendaStatus.PENDENTE_AUTORIZACAO
+
+        elif status == "DUPLICADO":
+            pagamento.status = StatusPagamento.AUTORIZADO  # confirmação idempotente
+
+        else:
+            pagamento.status = StatusPagamento.ERRO
+            venda.status = VendaStatus.ERRO_PAGAMENTO
+
+        pagamento.save()
+        venda.save()
+
+        # cria trilha auditável TEF (obrigatório por auditoria PCI)
+        registrar_auditoria_tef(pagamento=pagamento, retorno=retorno_tef)
+
+        return pagamento
+
